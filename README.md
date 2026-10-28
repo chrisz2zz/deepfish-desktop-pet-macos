@@ -263,7 +263,7 @@ deepfish-desktop-pet-macos/
   - **需要审批**：`write_file`、所有写操作、未知程序（`npm test`、`sed -i`、`find -delete`、`git push`、`rm -rf build`…），以及读取 `.ssh`、`.aws`、`.npmrc`、钥匙串、本应用设置等敏感路径。审批卡片出现在聊天里，显示将要执行的具体内容，`允许` / `拒绝` 二选一，**300 秒不点视为拒绝**；每次都问，不记忆。
   - **直接拒绝**：`sudo`/`su`、`shutdown`/`reboot`/`diskutil`/`mkfs`/`dd`、`security`（钥匙串命令行）、`launchctl`/`csrutil`/`nvram`/`tccutil`、`osascript`，以及 `curl`/`wget`/`ssh`/`scp`/`nc` 等外网与远程工具——避免读完本地文件再发出去。
 - **被拒绝之后**：模型会收到一条明确的工具结果（"用户拒绝了这次操作" / "该操作被安全策略禁止"），系统提示要求它不要重试同一调用，改换方式或直接说明做不到。
-- **命令沙箱**（`src-tauri/src/agent/sandbox.rs`，可在设置页关闭）：命令交给系统自带的 `/usr/bin/sandbox-exec` 执行，profile 以 `(deny default)` + Apple 的 `system.sb` 基线起步，因此不需要链接任何沙箱库，安装包体积不变。策略是：
+- **命令沙箱**（`src-tauri/src/agent/sandbox.rs`，可在设置页关闭）：命令交给系统自带的 `/usr/bin/sandbox-exec` 执行，profile 以 `(deny default)` + Apple 的 `system.sb` 基线起步，不引入任何第三方沙箱库或运行时，release 二进制实测只增加约 16 KB（约 0.1%）。策略是：
   - **可读**：`/bin`、`/usr`、`/System`、`/Library`、`/opt`、`/private/etc`、`/dev` 等系统路径，加上当前工作目录，以及主目录里**除凭据目录以外**的一切（`.ssh`、`.aws`、`.gnupg`、`.kube`、`.netrc`、`.npmrc`、`.config/gh`、`Library/Keychains`、`Library/Cookies`、`Library/Safari`、本应用配置目录按 `risk.rs` 的同一份 `SENSITIVE` 列表挖掉，`.config/gh` 这种只挖子目录，同级兄弟目录照常可读）。
   - **可写**：只有当前工作目录、`/tmp` 与 `$TMPDIR`，以及 `~/Library/Caches`、`~/.cache`、`~/.npm`、`~/.cargo`、`~/.rustup`、`~/.yarn`、`~/.gradle`、`~/.m2` 等构建缓存——否则 `npm install` / `cargo build` 会因为 `EACCES` 失败。
   - **联网**：只读命令（`ls`、`git status`…）完全禁网；需要审批的命令在用户点"允许"后才可以联网，审批卡片会写明「沙箱内，禁网」/「沙箱内，可联网」。
