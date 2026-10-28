@@ -200,6 +200,14 @@ fn pick_work_area(areas: &[WorkArea], x: i32, y: i32, width: i32, height: i32) -
 /// snapping back and trapping the pet on the taller display.
 const DRAG_MIN_VISIBLE_PERCENT: i64 = 60;
 
+/// Where the window is allowed to go: walking keeps the whole window on screen,
+/// dragging only keeps the character on screen.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Reach {
+    Walk,
+    Drag,
+}
+
 /// Clamps a window position to the screens. `relaxed` is used while dragging:
 /// it accepts positions that are still mostly visible, which is what lets the
 /// pet travel between displays that are aligned at the top but differ in height.
@@ -209,21 +217,38 @@ fn clamp_position(
     y: i32,
     width: i32,
     height: i32,
-    relaxed: bool,
+    reach: Reach,
+    top_room: i32,
 ) -> Option<(i32, i32)> {
-    if is_fully_visible(areas, x, y, width, height) {
+    // Everything is measured against the character, so the reserved band above
+    // it is free to leave the screen while dragging.
+    let room = top_room.clamp(0, height.saturating_sub(1));
+    let body_y = y + room;
+    let body_height = height - room;
+    let relaxed = reach == Reach::Drag;
+
+    if is_fully_visible(areas, x, body_y, width, body_height) {
         return Some((x, y));
     }
-    if relaxed && mostly_visible(areas, x, y, width, height) {
+    if relaxed && mostly_visible(areas, x, body_y, width, body_height) {
         return Some((x, y));
     }
-    let (ax, ay, aw, ah) = pick_work_area(areas, x, y, width, height)?;
+    let (ax, ay, aw, ah) = pick_work_area(areas, x, body_y, width, body_height)?;
     let max_x = (ax + aw - width).max(ax);
-    let max_y = (ay + ah - height).max(ay);
-    Some((x.clamp(ax, max_x), y.clamp(ay, max_y)))
+    let max_y = (ay + ah - body_height).max(ay);
+    Some((
+        x.clamp(ax, max_x),
+        body_y.clamp(ay, max_y) - room,
+    ))
 }
 
-fn clamp_to_work_area(window: &WebviewWindow, x: i32, y: i32, relaxed: bool) -> (i32, i32) {
+fn clamp_to_work_area(
+    window: &WebviewWindow,
+    x: i32,
+    y: i32,
+    reach: Reach,
+    top_room: f64,
+) -> (i32, i32) {
     let fallback = || {
         window.current_monitor().ok().flatten().map(|monitor| {
             let area = monitor.work_area();
@@ -264,13 +289,18 @@ fn clamp_to_work_area(window: &WebviewWindow, x: i32, y: i32, relaxed: bool) -> 
             (PET_WINDOW_HEIGHT * scale).round() as u32,
         )
     });
+    let top_room = match reach {
+        Reach::Walk => 0,
+        Reach::Drag => (top_room * scale).round() as i32,
+    };
     clamp_position(
         &areas,
         x,
         y,
         size.width as i32,
         size.height as i32,
-        relaxed,
+        reach,
+        top_room,
     )
     .unwrap_or((x, y))
 }
@@ -281,27 +311,84 @@ fn scale_delta(delta: i32, scale_factor: f64) -> i32 {
     (f64::from(delta) * scale_factor).round() as i32
 }
 
-/// `relaxed` lets a drag hang partly off screen so the pet can move between
+/// Result of a drag: where the window ended up and how much of the reserved
+/// bubble band is off screen, so the renderer can move the bubble down.
+#[derive(Clone, Copy, serde::Serialize)]
+#[serde(rename_all = "camelCase")]
+pub struct MoveResult {
+    pub x: i32,
+    pub y: i32,
+    pub overhang: f64,
+}
+
+struct Move {
+    x: i32,
+    y: i32,
+    boundary: bool,
+    overhang: f64,
+}
+
+/// `reach` lets a drag hang partly off screen so the pet can move between
 /// displays of different heights; walking stays strictly on screen.
-fn move_by(window: &WebviewWindow, dx: i32, dy: i32, relaxed: bool) -> WalkResult {
+fn move_by(window: &WebviewWindow, dx: i32, dy: i32, reach: Reach, top_room: f64) -> Move {
     let Ok(position) = window.outer_position() else {
-        return WalkResult {
+        return Move {
             x: 0,
             y: 0,
             boundary: true,
+            overhang: 0.0,
         };
     };
     let scale = window.scale_factor().unwrap_or(1.0);
     let target_x = position.x + scale_delta(dx, scale);
     let target_y = position.y + scale_delta(dy, scale);
-    let (x, y) = clamp_to_work_area(window, target_x, target_y, relaxed);
+    let (x, y) = clamp_to_work_area(window, target_x, target_y, reach, top_room);
     let _ = window.set_position(PhysicalPosition::new(x, y));
     remember_window_frame(window, x, y);
-    WalkResult {
+    Move {
         x,
         y,
         boundary: x != target_x || y != target_y,
+        overhang: top_overhang(window, x, y, scale),
     }
+}
+
+/// How far the window reaches above the work area of the screen it belongs to,
+/// in logical pixels.
+fn top_overhang(window: &WebviewWindow, x: i32, y: i32, scale: f64) -> f64 {
+    let areas: Vec<WorkArea> = window
+        .available_monitors()
+        .map(|monitors| {
+            monitors
+                .iter()
+                .map(|monitor| {
+                    let area = monitor.work_area();
+                    (
+                        area.position.x,
+                        area.position.y,
+                        area.size.width as i32,
+                        area.size.height as i32,
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    let size = window.outer_size().unwrap_or_else(|_| {
+        PhysicalSize::new(
+            (PET_WINDOW_WIDTH * scale).round() as u32,
+            (PET_WINDOW_HEIGHT * scale).round() as u32,
+        )
+    });
+    let Some((_, ay, _, _)) = pick_work_area(
+        &areas,
+        x,
+        y,
+        size.width as i32,
+        size.height as i32,
+    ) else {
+        return 0.0;
+    };
+    (f64::from((ay - y).max(0)) / scale).round()
 }
 
 /// The click-through poller cannot query window getters off the main thread,
@@ -517,13 +604,38 @@ fn pin_click_through(state: State<'_, Arc<ClickThrough>>, pinned: bool) {
 }
 
 #[tauri::command]
-fn move_pet(window: WebviewWindow, dx: i32, dy: i32) {
-    move_by(&window, dx, dy, true);
+/// `top_room` is the empty band the renderer reserves above the character, in
+/// logical pixels. A drag may push it off the top edge so the character can
+/// reach the top of the screen.
+fn move_pet(window: WebviewWindow, dx: i32, dy: i32, top_room: Option<f64>) -> MoveResult {
+    let moved = move_by(&window, dx, dy, Reach::Drag, top_room.unwrap_or(0.0));
+    MoveResult {
+        x: moved.x,
+        y: moved.y,
+        overhang: moved.overhang,
+    }
+}
+
+/// Pulls the pet fully back on screen, e.g. before the chat panel needs the
+/// reserved band that a drag may have pushed above the top edge.
+#[tauri::command]
+fn ensure_pet_visible(window: WebviewWindow) -> MoveResult {
+    let moved = move_by(&window, 0, 0, Reach::Walk, 0.0);
+    MoveResult {
+        x: moved.x,
+        y: moved.y,
+        overhang: moved.overhang,
+    }
 }
 
 #[tauri::command]
 fn walk_pet(window: WebviewWindow, dx: i32, dy: i32) -> WalkResult {
-    move_by(&window, dx, dy, false)
+    let moved = move_by(&window, dx, dy, Reach::Walk, 0.0);
+    WalkResult {
+        x: moved.x,
+        y: moved.y,
+        boundary: moved.boundary,
+    }
 }
 
 #[tauri::command]
@@ -592,6 +704,7 @@ pub fn run() {
             set_hit_mask,
             pin_click_through,
             move_pet,
+            ensure_pet_visible,
             walk_pet,
             show_pet_menu,
             open_settings,
@@ -613,7 +726,7 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        clamp_position, overlap_area, pick_work_area, scale_delta, visible_area,
+        clamp_position, overlap_area, pick_work_area, scale_delta, visible_area, Reach,
     };
 
     /// Two 1920x1080 screens side by side, the second one offset downwards.
@@ -621,6 +734,16 @@ mod tests {
         [(0, 0, 1920, 1080), (1920, 120, 1920, 1080)];
     const SINGLE: [(i32, i32, i32, i32); 1] = [(0, 0, 1920, 1080)];
     const PET: (i32, i32) = (360, 560);
+    /// The reserved bubble band of a 560-high window with a 330-high stage.
+    const ROOM: i32 = 208;
+
+    fn walk(areas: &[(i32, i32, i32, i32)], x: i32, y: i32, w: i32, h: i32) -> Option<(i32, i32)> {
+        clamp_position(areas, x, y, w, h, Reach::Walk, 0)
+    }
+
+    fn drag(areas: &[(i32, i32, i32, i32)], x: i32, y: i32, w: i32, h: i32) -> Option<(i32, i32)> {
+        clamp_position(areas, x, y, w, h, Reach::Drag, ROOM)
+    }
 
     #[test]
     fn scales_logical_deltas_for_retina_displays() {
@@ -634,16 +757,16 @@ mod tests {
     #[test]
     fn keeps_the_pet_inside_a_single_screen() {
         assert_eq!(
-            clamp_position(&SINGLE, -120, -40, PET.0, PET.1, false),
+            walk(&SINGLE, -120, -40, PET.0, PET.1),
             Some((0, 0))
         );
         assert_eq!(
-            clamp_position(&SINGLE, 1900, 900, PET.0, PET.1, false),
+            walk(&SINGLE, 1900, 900, PET.0, PET.1),
             Some((1560, 520))
         );
         // The far edge of the only screen is already a legal position.
         assert_eq!(
-            clamp_position(&SINGLE, 1560, 520, PET.0, PET.1, false),
+            walk(&SINGLE, 1560, 520, PET.0, PET.1),
             Some((1560, 520))
         );
     }
@@ -652,19 +775,32 @@ mod tests {
     fn lets_the_window_cross_onto_the_next_screen() {
         // A straddling window is legal, otherwise walking could never cross the seam.
         assert_eq!(
-            clamp_position(&SIDE_BY_SIDE, 1800, 200, PET.0, PET.1, false),
+            walk(&SIDE_BY_SIDE, 1800, 200, PET.0, PET.1),
             Some((1800, 200))
         );
         // ... and the pet may travel to the far edge of the second screen.
         assert_eq!(
-            clamp_position(&SIDE_BY_SIDE, 4000, 200, PET.0, PET.1, false),
+            walk(&SIDE_BY_SIDE, 4000, 200, PET.0, PET.1),
             Some((3480, 200))
         );
         // Below the second screen's work area it snaps back onto that screen.
         assert_eq!(
-            clamp_position(&SIDE_BY_SIDE, 1900, 900, PET.0, PET.1, false),
+            walk(&SIDE_BY_SIDE, 1900, 900, PET.0, PET.1),
             Some((1920, 640))
         );
+    }
+
+    #[test]
+    fn drags_the_character_up_to_the_screen_top() {
+        // The reserved bubble band may leave the screen at the top, otherwise
+        // the character could never get closer than 230 px to the top edge.
+        assert_eq!(drag(&SINGLE, 600, -200, PET.0, PET.1), Some((600, -200)));
+        // The band is exactly what may hang over: the character stops there.
+        assert_eq!(drag(&SINGLE, 600, -400, PET.0, PET.1), Some((600, -ROOM)));
+        // Walking still keeps the whole window on screen...
+        assert_eq!(walk(&SINGLE, 600, -200, PET.0, PET.1), Some((600, 0)));
+        // ... which is also how opening the chat panel pulls it back down.
+        assert_eq!(walk(&SINGLE, 600, -ROOM, PET.0, PET.1), Some((600, 0)));
     }
 
     /// A taller display on the left, aligned at the top, is what trapped the pet:
@@ -681,36 +817,36 @@ mod tests {
         // Standing low on the tall screen: strict clamping pulls the window up
         // onto the shorter screen instead of letting it hang over the edge.
         assert_eq!(
-            clamp_position(&TALL_NEIGHBOUR, 40, 1100, 720, 1120, false),
+            walk(&TALL_NEIGHBOUR, 40, 1100, 720, 1120),
             Some((40, 844))
         );
         // Just left of the seam the strict path keeps it on the tall screen, so
         // it can never advance past x = -720 on its own.
         assert_eq!(
-            clamp_position(&TALL_NEIGHBOUR, -500, 1100, 720, 1120, false),
+            walk(&TALL_NEIGHBOUR, -500, 1100, 720, 1120),
             Some((-720, 1100))
         );
         // A drag may cross, so the pet is never trapped on that display.
         assert_eq!(
-            clamp_position(&TALL_NEIGHBOUR, 40, 1100, 720, 1120, true),
+            drag(&TALL_NEIGHBOUR, 40, 1100, 720, 1120),
             Some((40, 1100))
         );
         assert_eq!(
-            clamp_position(&TALL_NEIGHBOUR, -720, 1100, 720, 1120, true),
+            drag(&TALL_NEIGHBOUR, -720, 1100, 720, 1120),
             Some((-720, 1100))
         );
         // Dragging far outside still snaps back onto the nearest screen.
         assert_eq!(
-            clamp_position(&TALL_NEIGHBOUR, -6000, 1100, 720, 1120, true),
+            drag(&TALL_NEIGHBOUR, -6000, 1100, 720, 1120),
             Some((-4096, 1100))
         );
         // ... and the same just left of the seam.
         assert_eq!(
-            clamp_position(&TALL_NEIGHBOUR, -500, 1100, 720, 1120, true),
+            drag(&TALL_NEIGHBOUR, -500, 1100, 720, 1120),
             Some((-500, 1100))
         );
         assert_eq!(
-            clamp_position(&TALL_NEIGHBOUR, 900, 3000, 720, 1120, true),
+            drag(&TALL_NEIGHBOUR, 900, 3000, 720, 1120),
             Some((900, 844))
         );
     }

@@ -80,6 +80,18 @@ input { font: inherit; }
   transform: rotate(45deg);
 }
 
+/* The character is hugging the top edge, so the reserved band above it is off
+   screen: show the bubble inside the character area instead of losing it. */
+.pet-app.hug-top .speech {
+  /* Moving to the character row keeps the bubble inside the window; absolute
+     positioning does not work here because the grid static position wins. */
+  grid-area: pet;
+  align-self: end;
+  margin-bottom: 4px;
+  max-height: 104px;
+}
+.pet-app.hug-top .speech::after { display: none; }
+
 .speech.visible { opacity: 1; transform: translateY(0); }
 .speech strong { display: block; margin-bottom: 3px; color: var(--blue); font-size: 12px; }
 .speech span { display: block; font-size: 13px; line-height: 1.45; }
@@ -729,13 +741,18 @@ input { font: inherit; }
 }
 .message.error { background: rgba(255, 240, 240, 0.94); color: #a42d35; }
 .message.streaming::after { content: "▍"; margin-left: 2px; animation: caret-blink 0.9s steps(2) infinite; }
-.chat-form { display: grid; grid-template-columns: 1fr auto; gap: 6px; }
-.chat-form input {
+.chat-form { display: grid; grid-template-columns: 1fr auto; gap: 6px; align-items: end; }
+.chat-form textarea {
   min-width: 0;
-  height: 30px;
+  min-height: 30px;
+  max-height: 88px;
   border: 0;
-  border-radius: 999px;
-  padding: 0 12px;
+  border-radius: 14px;
+  padding: 6px 12px;
+  resize: none;
+  overflow-y: auto;
+  line-height: 1.5;
+  font: inherit;
   outline: 0;
   background: rgba(255, 255, 255, 0.9);
   box-shadow: 0 6px 16px rgba(17, 35, 78, 0.16);
@@ -744,7 +761,7 @@ input { font: inherit; }
   font-size: 12px;
   user-select: text;
 }
-.chat-form input:focus { box-shadow: 0 0 0 3px rgba(40, 118, 232, 0.24); }
+.chat-form textarea:focus { box-shadow: 0 0 0 3px rgba(40, 118, 232, 0.24); }
 .chat-form button {
   width: 30px;
   height: 30px;

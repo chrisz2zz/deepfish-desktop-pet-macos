@@ -29,9 +29,12 @@
     });
 
   root.deepFish = {
-    move: (delta) => {
-      call("move_pet", { dx: round(delta?.x), dy: round(delta?.y) }).catch(() => {});
-    },
+    // Returns the resulting position so the renderer knows whether the bubble
+    // band ended up above the screen edge.
+    move: (delta, topRoom) =>
+      call("move_pet", { dx: round(delta?.x), dy: round(delta?.y), topRoom: topRoom ?? null }),
+    /// Pulls the window back on screen before the chat panel needs its space.
+    ensureVisible: () => call("ensure_pet_visible"),
     walkStep: (delta) => call("walk_pet", { dx: round(delta?.x), dy: round(delta?.y) }),
     showMenu: () => {
       call("show_pet_menu").catch(() => {});

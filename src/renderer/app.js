@@ -453,6 +453,8 @@ function startWalk(duration = 7200, announce = true) {
     try {
       const result = await window.deepFish.walkStep({ x: walkDirection * 3, y: 0 });
       if (result?.boundary) walkDirection *= -1;
+      // Walking is clamped strictly, so the bubble band is back on screen.
+      appRoot.classList.remove("hug-top");
     } finally {
       walkPending = false;
     }
@@ -557,9 +559,34 @@ function reactToWalkHover(event) {
   }
 }
 
+/// The window keeps a band above the character for bubbles and the chat panel.
+/// Dragging may push that band above the screen so the character can reach the
+/// top edge; while that happens the speech bubble moves inside the character
+/// area instead of being drawn off screen.
+function bubbleRoom() {
+  const styles = getComputedStyle(appRoot);
+  const padding = parseFloat(styles.paddingTop) + parseFloat(styles.paddingBottom);
+  const petHeight = parseFloat(styles.getPropertyValue("--pet-height")) || 330;
+  return Math.max(0, appRoot.clientHeight - padding - petHeight);
+}
+
+function applyTopHug(overhang) {
+  // 130 is the tallest bubble plus its tail: below that the band is still
+  // visible, so the usual placement keeps working.
+  const hug = Number(overhang) > Math.max(0, bubbleRoom() - 130);
+  appRoot.classList.toggle("hug-top", hug);
+}
+
 async function openChat() {
   if (!chatPanel.hidden) return;
   stopWalk();
+  // The panel lives in the reserved band, so the window has to come back down.
+  try {
+    const moved = await window.deepFish.ensureVisible?.();
+    applyTopHug(moved?.overhang ?? 0);
+  } catch {
+    applyTopHug(0);
+  }
   chatPanel.hidden = false;
   stopFramePlayback();
   hideNotice();
@@ -1002,6 +1029,7 @@ async function sendChat(event) {
   if (!activeSession) return;
 
   chatInput.value = "";
+  autoGrowInput();
   hideSessionList();
   runBehavior("think", { say: false });
   pendingAssistant = null;
@@ -1050,7 +1078,10 @@ stage.addEventListener("pointermove", (event) => {
   const dy = event.screenY - drag.y;
   if (dx || dy) {
     gestureApi.trackSpin(drag.spin, event.screenX, event.screenY, event.timeStamp);
-    window.deepFish.move({ x: dx, y: dy });
+    window.deepFish
+      .move({ x: dx, y: dy }, bubbleRoom())
+      .then((moved) => applyTopHug(moved?.overhang))
+      .catch(() => {});
     drag.x = event.screenX;
     drag.y = event.screenY;
     drag.total += Math.abs(dx) + Math.abs(dy);
@@ -1114,7 +1145,7 @@ stage.addEventListener("keydown", (event) => {
 // Same reason as above, for drags that start on any other part of the pet.
 document.addEventListener("dragstart", (event) => event.preventDefault());
 document.addEventListener("selectstart", (event) => {
-  if (!event.target.closest(".chat-log, .chat-input, .session-list")) event.preventDefault();
+  if (!event.target.closest(".chat-log, #chat-input, .session-list")) event.preventDefault();
 });
 
 document.addEventListener("contextmenu", (event) => {
@@ -1125,6 +1156,20 @@ document.addEventListener("contextmenu", (event) => {
 
 chatClose.addEventListener("click", closeChat);
 chatForm.addEventListener("submit", sendChat);
+
+/// Grows the composer with the text, up to the `max-height` in the stylesheet.
+function autoGrowInput() {
+  chatInput.style.height = "auto";
+  chatInput.style.height = `${Math.min(chatInput.scrollHeight, 88)}px`;
+}
+
+chatInput.addEventListener("input", autoGrowInput);
+chatInput.addEventListener("keydown", (event) => {
+  // Enter sends, Shift+Enter (and Enter while composing Chinese) inserts a line.
+  if (event.key !== "Enter" || event.shiftKey || event.isComposing) return;
+  event.preventDefault();
+  chatForm.requestSubmit();
+});
 sessionButton.addEventListener("click", toggleSessionList);
 sessionNew.addEventListener("click", createSession);
 sessionCompact.addEventListener("click", async () => {

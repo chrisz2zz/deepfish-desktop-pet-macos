@@ -17,8 +17,9 @@ function fakeTauri() {
     listeners,
     api: {
       core: {
-        invoke: async (...args) => {
-          calls.push(args);
+        invoke: async (command, args) => {
+          calls.push([command, args]);
+          if (command === "move_pet") return { x: 10, y: 20, overhang: 0 };
           return undefined;
         }
       },
@@ -41,8 +42,9 @@ test("exposes the desktop bridge over Tauri commands", async () => {
   const tauri = fakeTauri();
   const window = loadBridge({ __TAURI__: tauri.api });
 
-  window.deepFish.move({ x: 1.4, y: -2.6 });
+  const moved = await window.deepFish.move({ x: 1.4, y: -2.6 }, 208);
   await window.deepFish.walkStep({ x: -3, y: 0 });
+  await window.deepFish.ensureVisible();
   await window.deepFish.getSettings();
   await window.deepFish.saveSettings({ scale: 1 });
   await window.deepFish.agent.openSession("s1");
@@ -53,8 +55,9 @@ test("exposes the desktop bridge over Tauri commands", async () => {
   assert.equal(
     JSON.stringify(tauri.calls.map(([command, args]) => [command, args ?? null])),
     JSON.stringify([
-      ["move_pet", { dx: 1, dy: -3 }],
+      ["move_pet", { dx: 1, dy: -3, topRoom: 208 }],
       ["walk_pet", { dx: -3, dy: 0 }],
+      ["ensure_pet_visible", null],
       ["get_settings", null],
       ["save_settings", { settings: { scale: 1 } }],
       ["agent_open_session", { sessionId: "s1" }],
@@ -63,6 +66,8 @@ test("exposes the desktop bridge over Tauri commands", async () => {
       ["open_settings", null]
     ])
   );
+  // The drag result carries how much of the bubble band is off screen.
+  assert.deepEqual(moved, { x: 10, y: 20, overhang: 0 });
 });
 
 test("exposes session and context management commands", async () => {
