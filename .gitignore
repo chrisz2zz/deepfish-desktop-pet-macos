@@ -5,3 +5,10 @@ src-tauri/target/
 src-tauri/gen/
 .DS_Store
 *.log
+
+# Runtime data lives in ~/Library/Application Support/com.deepfish.desktop-pet,
+# but keep these patterns as insurance against copying it into the repo by hand.
+settings.json
+sessions.json
+.env
+.env.*
