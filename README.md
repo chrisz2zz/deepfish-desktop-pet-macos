@@ -277,6 +277,7 @@ deepfish-desktop-pet-macos/
 
 - 穿透点击由渲染层把当前帧的 alpha 通道采样成 8 px 网格（`set_hit_mask`），Rust 侧以 40 ms 轮询光标并按网格切换窗口的鼠标穿透；拖动期间整窗临时保持可交互。
 - 气泡区高度跟随宠物缩放后的真实高度，对话与动作台词都紧贴头顶；聊天打开时不再弹动作台词，避免两块气泡叠在一起。
+- 窗口位置改由 `setFrameOrigin:`（AppKit 左下角坐标）设置，并替换掉 `NSWindow` 的 `-constrainFrameRect:toScreen:`（只对桌宠窗口放行，其它窗口仍走原实现）：否则 AppKit 会把窗口顶边压到菜单栏下面，人物永远到不了屏幕顶端。位置仍由 `clamp_position` 夹取，散步与打开聊天时会严格回到屏幕内。
 
 ## 已知限制
 

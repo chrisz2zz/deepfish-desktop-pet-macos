@@ -225,21 +225,20 @@ fn clamp_position(
     let room = top_room.clamp(0, height.saturating_sub(1));
     let body_y = y + room;
     let body_height = height - room;
-    let relaxed = reach == Reach::Drag;
 
     if is_fully_visible(areas, x, body_y, width, body_height) {
         return Some((x, y));
     }
-    if relaxed && mostly_visible(areas, x, body_y, width, body_height) {
+    let (ax, ay, aw, ah) = pick_work_area(areas, x, body_y, width, body_height)?;
+    if reach == Reach::Drag
+        && body_y >= ay
+        && mostly_visible(areas, x, body_y, width, body_height)
+    {
         return Some((x, y));
     }
-    let (ax, ay, aw, ah) = pick_work_area(areas, x, body_y, width, body_height)?;
     let max_x = (ax + aw - width).max(ax);
     let max_y = (ay + ah - body_height).max(ay);
-    Some((
-        x.clamp(ax, max_x),
-        body_y.clamp(ay, max_y) - room,
-    ))
+    Some((x.clamp(ax, max_x), body_y.clamp(ay, max_y) - room))
 }
 
 fn clamp_to_work_area(
@@ -343,7 +342,7 @@ fn move_by(window: &WebviewWindow, dx: i32, dy: i32, reach: Reach, top_room: f64
     let target_x = position.x + scale_delta(dx, scale);
     let target_y = position.y + scale_delta(dy, scale);
     let (x, y) = clamp_to_work_area(window, target_x, target_y, reach, top_room);
-    let _ = window.set_position(PhysicalPosition::new(x, y));
+    place_window(window, x, y, scale);
     remember_window_frame(window, x, y);
     Move {
         x,
@@ -391,6 +390,115 @@ fn top_overhang(window: &WebviewWindow, x: i32, y: i32, scale: f64) -> f64 {
     (f64::from((ay - y).max(0)) / scale).round()
 }
 
+/// AppKit runs every window move through `-constrainFrameRect:toScreen:`, which
+/// keeps the top edge below the menu bar. A desktop pet needs the opposite: the
+/// empty bubble band may leave the screen so the character can reach the top.
+/// The method is replaced once; every other window (and the settings window)
+/// still goes through the original implementation.
+#[cfg(target_os = "macos")]
+mod unconstrained {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    use objc2::runtime::{AnyObject, Imp, Sel};
+    use objc2_foundation::NSRect;
+
+    static PET_WINDOW: AtomicUsize = AtomicUsize::new(0);
+    static ORIGINAL: AtomicUsize = AtomicUsize::new(0);
+
+    unsafe extern "C-unwind" fn constrain(
+        this: *mut AnyObject,
+        cmd: Sel,
+        rect: NSRect,
+        screen: *mut AnyObject,
+    ) -> NSRect {
+        if (this as usize) == PET_WINDOW.load(Ordering::Relaxed) {
+            return rect;
+        }
+        let address = ORIGINAL.load(Ordering::Relaxed);
+        if address == 0 {
+            return rect;
+        }
+        // SAFETY: the address was taken from this same method's implementation.
+        let original: unsafe extern "C-unwind" fn(
+            *mut AnyObject,
+            Sel,
+            NSRect,
+            *mut AnyObject,
+        ) -> NSRect = unsafe { std::mem::transmute(address) };
+        unsafe { original(this, cmd, rect, screen) }
+    }
+
+    /// Lets `window` leave the screen, leaving every other window constrained.
+    ///
+    /// # Safety
+    ///
+    /// `window` must be a live `NSWindow` and this must run on the main thread.
+    pub unsafe fn allow_off_screen(window: *mut AnyObject) {
+        PET_WINDOW.store(window as usize, Ordering::Relaxed);
+        if ORIGINAL.load(Ordering::Relaxed) != 0 {
+            return;
+        }
+        let Some(method) = unsafe { window.as_ref() }.and_then(|window| {
+            window
+                .class()
+                .instance_method(objc2::sel!(constrainFrameRect:toScreen:))
+        }) else {
+            return;
+        };
+        ORIGINAL.store(method.implementation() as usize, Ordering::Relaxed);
+        // SAFETY: `constrain` matches the method signature and defers to the
+        // previous implementation for every other window.
+        let replacement: Imp = unsafe { std::mem::transmute(constrain as *const ()) };
+        unsafe { method.set_implementation(replacement) };
+    }
+}
+
+/// AppKit's `setFrameTopLeftPoint:` (which Tauri uses) is the constrained path,
+/// so positions are applied through `setFrameOrigin:` instead.
+#[cfg(target_os = "macos")]
+fn place_window(window: &WebviewWindow, x: i32, y: i32, scale: f64) {
+    use objc2_app_kit::{NSWindow, NSScreen};
+    use objc2_foundation::{MainThreadMarker, NSPoint};
+
+    let Ok(handle) = window.ns_window() else {
+        return;
+    };
+    let Ok(size) = window.outer_size() else {
+        return;
+    };
+    let left = f64::from(x) / scale;
+    let top = f64::from(y) / scale;
+    let height = f64::from(size.height) / scale;
+    let app = window.app_handle().clone();
+
+    // Carried as an address so the closure stays `Send`; it is only turned back
+    // into a pointer on the main thread.
+    let handle = handle as usize;
+    let _ = app.run_on_main_thread(move || {
+        let Some(main) = MainThreadMarker::new() else {
+            return;
+        };
+        let Some(screen) = NSScreen::screens(main).firstObject() else {
+            return;
+        };
+        // SAFETY: the address comes from a live window handle and is only used
+        // on the main thread.
+        let Some(window) = (unsafe { (handle as *mut NSWindow).as_ref() }) else {
+            return;
+        };
+        unsafe { unconstrained::allow_off_screen((handle as *mut NSWindow).cast()) };
+        // AppKit measures from the bottom-left of the primary screen.
+        let origin = NSPoint::new(left, screen.frame().size.height - top - height);
+        window.setFrameOrigin(origin);
+    });
+}
+
+#[cfg(not(target_os = "macos"))]
+fn place_window(window: &WebviewWindow, x: i32, y: i32, _scale: f64) {
+    let _ = window.set_position(PhysicalPosition::new(x, y));
+}
+
+/// The click-through poller cannot query window getters off the main thread,
 /// The click-through poller cannot query window getters off the main thread,
 /// so the frame it hit-tests against is cached whenever the window moves.
 fn remember_window_frame(window: &WebviewWindow, x: i32, y: i32) {

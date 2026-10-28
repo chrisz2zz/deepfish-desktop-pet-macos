@@ -477,7 +477,11 @@ function runBehavior(id, options = {}) {
   animate(id, behavior.duration);
   playBehaviorFrames(id, behavior.duration);
   if (id === "dizzy") dizzyStars(behavior.duration);
-  particles(behavior.icon, ["cry", "shock", "rival"].includes(id) ? 6 : 3);
+  // A drag already ends with its own line and animation; floating icons on top
+  // of the character just look like leftover artifacts.
+  if (options.particles !== false) {
+    particles(behavior.icon, ["cry", "shock", "rival"].includes(id) ? 6 : 3);
+  }
   if (options.say !== false) say(behaviorApi.formatLine(id), options.label || behaviorLabels[id], Math.min(5200, behavior.duration + 1800));
   clearTimeout(sceneTimer);
   sceneTimer = setTimeout(() => {
@@ -1100,7 +1104,7 @@ stage.addEventListener("pointerup", (event) => {
     return;
   }
   if (moved > 10) {
-    runBehavior("startle", { label: "拖拽反馈" });
+    runBehavior("startle", { label: "拖拽反馈", particles: false });
     return;
   }
   runBehavior("pat", { say: false });
