@@ -18,6 +18,7 @@ const scaleOutput = document.querySelector("#scale-output");
 const behaviorIntensity = document.querySelector("#behavior-intensity");
 const agentLoopLimit = document.querySelector("#agent-loop-limit");
 const toolCallLimit = document.querySelector("#tool-call-limit");
+const sandboxedCommands = document.querySelector("#sandboxed-commands");
 const behaviorOutput = document.querySelector("#behavior-output");
 const status = document.querySelector("#status");
 const resetProvider = document.querySelector("#reset-provider");
@@ -74,7 +75,8 @@ form.addEventListener("submit", async (event) => {
       deepseekSearch: deepseekSearch.checked,
       deepseekFetch: deepseekFetch.checked,
       agentLoopLimit: Number(agentLoopLimit.value),
-      toolCallLimit: Number(toolCallLimit.value)
+      toolCallLimit: Number(toolCallLimit.value),
+      sandboxedCommands: sandboxedCommands.checked
     });
     apiKey.value = "";
     clearKey.checked = false;
@@ -100,6 +102,7 @@ window.deepFish.getSettings().then((settings) => {
   deepseekFetch.checked = Boolean(settings.deepseekFetch);
   agentLoopLimit.value = settings.agentLoopLimit;
   toolCallLimit.value = settings.toolCallLimit;
+  sandboxedCommands.checked = Boolean(settings.sandboxedCommands);
   behaviorIntensity.value = settings.behaviorIntensity;
   behaviorOutput.value = `${Math.round(Number(settings.behaviorIntensity) * 100)}%`;
   keyStatus.textContent = settings.hasApiKey ? "已保存在本机配置文件，留空即可保留" : "尚未保存 Key";

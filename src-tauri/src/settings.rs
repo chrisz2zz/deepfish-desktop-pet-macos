@@ -37,6 +37,8 @@ pub struct Settings {
     pub deepseek_search: bool,
     /// DeepSeek server-side page fetch (billed per request).
     pub deepseek_fetch: bool,
+    /// Run `run_command` inside the Seatbelt sandbox.
+    pub sandboxed_commands: bool,
     /// Kept in the local settings file only; never sent to the renderer.
     pub api_key: String,
 }
@@ -58,6 +60,7 @@ impl Default for Settings {
             tool_call_limit: DEFAULT_TOOL_CALL_LIMIT,
             deepseek_search: false,
             deepseek_fetch: false,
+            sandboxed_commands: true,
             api_key: String::new(),
         }
     }
@@ -88,6 +91,7 @@ pub struct SettingsPatch {
     pub tool_call_limit: Option<u32>,
     pub deepseek_search: Option<bool>,
     pub deepseek_fetch: Option<bool>,
+    pub sandboxed_commands: Option<bool>,
     pub api_key: Option<String>,
     pub clear_api_key: Option<bool>,
 }
@@ -169,6 +173,9 @@ impl SettingsStore {
         }
         if let Some(value) = patch.deepseek_fetch {
             self.data.deepseek_fetch = value;
+        }
+        if let Some(value) = patch.sandboxed_commands {
+            self.data.sandboxed_commands = value;
         }
 
         self.data.scale = clamp(self.data.scale, 0.6, 1.15);
@@ -333,6 +340,26 @@ mod tests {
             .unwrap();
         assert_eq!(saved.settings.agent_loop_limit, 12);
         assert_eq!(saved.settings.tool_call_limit, 4);
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn sandbox_is_on_by_default_and_can_be_switched_off() {
+        let dir = std::env::temp_dir().join(format!("deepfish-sbx-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let mut store = SettingsStore::load(&dir);
+        assert!(store.data.sandboxed_commands);
+
+        let saved = store
+            .save(SettingsPatch {
+                sandboxed_commands: Some(false),
+                ..SettingsPatch::default()
+            })
+            .unwrap();
+        assert!(!saved.settings.sandboxed_commands);
+
+        let reloaded = SettingsStore::load(&dir);
+        assert!(!reloaded.data.sandboxed_commands);
         fs::remove_dir_all(dir).ok();
     }
 

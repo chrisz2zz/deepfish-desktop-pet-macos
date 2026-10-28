@@ -1,5 +1,6 @@
 pub mod context;
 pub mod risk;
+pub mod sandbox;
 pub mod session;
 pub mod tools;
 pub mod web;
@@ -441,6 +442,7 @@ async fn run_loop(
             api_key.map(str::to_string),
             deepseek && settings.deepseek_search,
             deepseek && settings.deepseek_fetch,
+            settings.sandboxed_commands,
         );
         let tools = use_tools.then(|| tools::specs(&tool_context));
         let body = chat::payload(settings, messages, tools, true, MAX_REPLY_TOKENS);
@@ -520,7 +522,7 @@ async fn run_loop(
                 continue;
             }
             tool_calls_used += 1;
-            let plan = risk::plan(&root, call);
+            let plan = risk::plan(&root, call, settings.sandboxed_commands);
             let blocked = matches!(plan.risk, risk::Risk::Blocked);
             let mut denied = false;
             if plan.risk != risk::Risk::Safe {

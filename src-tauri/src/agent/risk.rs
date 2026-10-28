@@ -100,8 +100,9 @@ pub fn resolve(root: &Path, raw: &str) -> Result<PathBuf, String> {
 }
 
 /// Paths that hold credentials. Reading them is never automatic; the user has
-/// to say yes, because a chat message must not be able to leak a key.
-const SENSITIVE: &[&str] = &[
+/// to say yes, because a chat message must not be able to leak a key. The command
+/// sandbox treats the same list as unreadable.
+pub const SENSITIVE: &[&str] = &[
     ".ssh",
     ".aws",
     ".gnupg",
@@ -274,8 +275,9 @@ fn argument(args: &Value, key: &str) -> String {
 }
 
 /// Decides what has to happen before a tool call runs, and what the approval
-/// card should show.
-pub fn plan(root: &Path, call: &ToolCall) -> Plan {
+/// card should show. `sandboxed` only changes the wording: it tells the user
+/// what the command will and will not be able to touch.
+pub fn plan(root: &Path, call: &ToolCall, sandboxed: bool) -> Plan {
     let args: Value = serde_json::from_str(&call.arguments).unwrap_or(Value::Null);
     match call.name.as_str() {
         "list_dir" => {
@@ -328,7 +330,11 @@ pub fn plan(root: &Path, call: &ToolCall) -> Plan {
                 }
             }
             match command_risk(root, &command) {
+                Risk::Safe if sandboxed => Plan::safe(format!("{summary}（沙箱内，禁网）")),
                 Risk::Safe => Plan::safe(summary),
+                Risk::NeedsApproval if sandboxed => {
+                    Plan::approval(format!("{summary}（沙箱内，可联网）"))
+                }
                 Risk::NeedsApproval => Plan::approval(summary),
                 Risk::Blocked => Plan::blocked(format!("命令被安全策略禁止：{command}")),
             }
@@ -448,6 +454,7 @@ mod tests {
         let planned = plan(
             &root,
             &call("web_search", r#"{"query":"DeepSeek 发布"}"#),
+            true,
         );
         assert_eq!(planned.risk, Risk::Safe);
         assert!(planned.summary.contains("联网搜索"));
@@ -455,6 +462,7 @@ mod tests {
         let planned = plan(
             &root,
             &call("web_fetch", r#"{"url":"https://example.com/a"}"#),
+            true,
         );
         assert_eq!(planned.risk, Risk::Safe);
         assert!(planned.summary.contains("https://example.com/a"));
@@ -463,24 +471,29 @@ mod tests {
     #[test]
     fn plans_carry_a_readable_summary() {
         let root = home();
-        let planned = plan(&root, &call("read_file", r#"{"path":"notes/a.md"}"#));
+        let planned = plan(&root, &call("read_file", r#"{"path":"notes/a.md"}"#), true);
         assert_eq!(planned.risk, Risk::Safe);
         assert_eq!(planned.summary, "读取 ~/notes/a.md");
 
-        let planned = plan(&root, &call("write_file", r#"{"path":"~/new.txt","content":"hi"}"#));
+        let planned = plan(&root, &call("write_file", r#"{"path":"~/new.txt","content":"hi"}"#), true);
         assert_eq!(planned.risk, Risk::NeedsApproval);
         assert!(planned.summary.contains("写入 ~/new.txt"));
 
-        let planned = plan(&root, &call("read_file", r#"{"path":"/etc/passwd"}"#));
+        let planned = plan(&root, &call("read_file", r#"{"path":"/etc/passwd"}"#), true);
         assert_eq!(planned.risk, Risk::Blocked);
 
-        let planned = plan(&root, &call("run_command", r#"{"command":"ls -la"}"#));
+        let planned = plan(&root, &call("run_command", r#"{"command":"ls -la"}"#), true);
         assert_eq!(planned.risk, Risk::Safe);
+        assert!(planned.summary.contains("禁网"));
 
-        let planned = plan(&root, &call("run_command", r#"{"command":"npm test"}"#));
+        let planned = plan(&root, &call("run_command", r#"{"command":"npm test"}"#), true);
         assert_eq!(planned.risk, Risk::NeedsApproval);
+        assert!(planned.summary.contains("可联网"));
 
-        let planned = plan(&root, &call("pet_say", r#"{"text":"hi"}"#));
+        let planned = plan(&root, &call("run_command", r#"{"command":"npm test"}"#), false);
+        assert!(!planned.summary.contains("沙箱"));
+
+        let planned = plan(&root, &call("pet_say", r#"{"text":"hi"}"#), true);
         assert_eq!(planned.risk, Risk::Safe);
     }
 }

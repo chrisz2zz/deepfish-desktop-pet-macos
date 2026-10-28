@@ -52,15 +52,24 @@ pub struct ToolContext {
     /// DeepSeek server-side search/fetch, both opt-in in the settings window.
     pub search: bool,
     pub fetch: bool,
+    /// Wrap `run_command` in the Seatbelt sandbox (on by default).
+    pub sandbox: bool,
 }
 
 impl ToolContext {
-    pub fn new(root: PathBuf, api_key: Option<String>, search: bool, fetch: bool) -> Self {
+    pub fn new(
+        root: PathBuf,
+        api_key: Option<String>,
+        search: bool,
+        fetch: bool,
+        sandbox: bool,
+    ) -> Self {
         Self {
             root,
             api_key,
             search,
             fetch,
+            sandbox,
         }
     }
 }
@@ -234,7 +243,7 @@ pub fn specs(context: &ToolContext) -> Value {
             "type": "function",
             "function": {
                 "name": "run_command",
-                "description": "在用户主目录内执行一条 shell 命令并返回输出。只读命令会自动执行，其它命令需要用户审批；涉及 sudo、凭据或外网访问的命令一律禁止。",
+                "description": "在用户主目录内执行一条 shell 命令并返回输出。只读命令会自动执行，其它命令需要用户审批；涉及 sudo、凭据或外网访问的命令一律禁止。命令默认在系统沙箱内运行：只能写当前工作目录、临时目录和构建缓存，只读命令没有网络；越界访问会得到 Operation not permitted。",
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -492,11 +501,44 @@ fn drain(mut reader: impl std::io::Read) -> String {
     String::from_utf8_lossy(&kept).to_string()
 }
 
-fn run_command(root: &Path, command: &str, cwd: &Path, timeout: Duration) -> ToolOutcome {
+fn run_command(
+    root: &Path,
+    command: &str,
+    cwd: &Path,
+    timeout: Duration,
+    sandboxed: bool,
+) -> ToolOutcome {
     let name = "run_command";
-    let mut child = match Command::new("sh")
-        .arg("-c")
-        .arg(command)
+    let sandboxed = sandboxed && super::sandbox::SUPPORTED;
+    let launch = if sandboxed {
+        // Read-only commands get no network at all; anything the user had to
+        // approve keeps the connectivity it was approved for.
+        let network = risk::command_risk(root, command) != risk::Risk::Safe;
+        let policy = super::sandbox::Policy {
+            home: root,
+            cwd,
+            network,
+        };
+        match super::sandbox::wrap(command, &policy) {
+            Ok(launch) => launch,
+            // Fail closed: an unavailable sandbox must not silently become an
+            // unrestricted shell.
+            Err(error) => {
+                return failure(
+                    name,
+                    format!("{error}，命令未执行。请让主人手动在终端里运行：{command}"),
+                )
+            }
+        }
+    } else {
+        super::sandbox::Launch {
+            program: PathBuf::from("sh"),
+            args: vec!["-c".to_string(), command.to_string()],
+        }
+    };
+
+    let mut child = match Command::new(&launch.program)
+        .args(&launch.args)
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
@@ -538,9 +580,10 @@ fn run_command(root: &Path, command: &str, cwd: &Path, timeout: Duration) -> Too
         (false, Some(code)) => format!("退出码 {code}"),
         (false, None) => "被信号终止".to_string(),
     };
+    let mode = if sandboxed { "，沙箱内" } else { "" };
     let _ = write!(
         report,
-        "$ {command}\n（目录 {}，{status_line}）\n",
+        "$ {command}\n（目录 {}，{status_line}{mode}）\n",
         risk::display_path(root, cwd)
     );
     if !out.trim().is_empty() {
@@ -548,6 +591,9 @@ fn run_command(root: &Path, command: &str, cwd: &Path, timeout: Duration) -> Too
     }
     if !err.trim().is_empty() {
         let _ = write!(report, "stderr:\n{}\n", err.trim_end());
+    }
+    if sandboxed && (err.contains("Operation not permitted") || err.contains("Permission denied")) {
+        report.push_str("（沙箱拦截了越界访问：只允许读写当前目录、临时目录和构建缓存）\n");
     }
     if out.trim().is_empty() && err.trim().is_empty() {
         report.push_str("（没有输出）");
@@ -692,7 +738,13 @@ pub fn execute(app: &AppHandle, ctx: &ToolContext, call: &ToolCall) -> ToolOutco
                 .and_then(Value::as_u64)
                 .unwrap_or(DEFAULT_TIMEOUT_MS)
                 .clamp(500, MAX_TIMEOUT_MS);
-            run_command(root, &command, &cwd, Duration::from_millis(timeout))
+            run_command(
+                root,
+                &command,
+                &cwd,
+                Duration::from_millis(timeout),
+                ctx.sandbox,
+            )
         }
         other => ToolOutcome {
             content: format!("未知工具：{other}"),
@@ -708,7 +760,7 @@ mod tests {
     use std::path::PathBuf;
 
     fn context(search: bool, fetch: bool) -> ToolContext {
-        ToolContext::new(PathBuf::from("/tmp"), Some("sk-test".to_string()), search, fetch)
+        ToolContext::new(PathBuf::from("/tmp"), Some("sk-test".to_string()), search, fetch, true)
     }
 
     #[test]
@@ -768,7 +820,7 @@ mod tests {
 
         // Enabled but without a key: the tool explains what is missing instead
         // of trying an unauthenticated request.
-        let keyless = ToolContext::new(PathBuf::from("/tmp"), None, true, true);
+        let keyless = ToolContext::new(PathBuf::from("/tmp"), None, true, true, true);
         let search = run_web_search(&keyless, &json!({ "query": "deepseek" }));
         assert!(search.content.contains("API Key"), "{}", search.content);
     }
@@ -822,14 +874,20 @@ mod tests {
     #[test]
     fn runs_commands_and_reports_output() {
         let root = scratch("cmd");
-        let ok = run_command(&root, "printf 'hi there'", &root, Duration::from_secs(5));
+        let ok = run_command(&root, "printf 'hi there'", &root, Duration::from_secs(5), true);
         assert!(ok.content.contains("hi there"), "{}", ok.content);
         assert!(ok.content.contains("退出码 0"), "{}", ok.content);
+        #[cfg(target_os = "macos")]
+        assert!(ok.content.contains("沙箱内"), "{}", ok.content);
 
-        let failed = run_command(&root, "exit 3", &root, Duration::from_secs(5));
+        let plain = run_command(&root, "printf 'raw'", &root, Duration::from_secs(5), false);
+        assert!(plain.content.contains("raw"), "{}", plain.content);
+        assert!(!plain.content.contains("沙箱内"), "{}", plain.content);
+
+        let failed = run_command(&root, "exit 3", &root, Duration::from_secs(5), true);
         assert!(failed.content.contains("退出码 3"), "{}", failed.content);
 
-        let timed_out = run_command(&root, "sleep 5", &root, Duration::from_millis(600));
+        let timed_out = run_command(&root, "sleep 5", &root, Duration::from_millis(600), true);
         assert!(timed_out.content.contains("超时"), "{}", timed_out.content);
         std::fs::remove_dir_all(&root).ok();
     }

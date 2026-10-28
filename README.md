@@ -20,6 +20,7 @@
 - 随机闲置彩蛋与 31 张固定锚点 PNG 表情、道具和动作帧
 - 休眠恢复检测，醒来后随机触发“伸懒腰”或“惊醒”
 - Agent harness：多会话管理、上下文预算与自动压缩、流式输出、工具调用与后台多步任务
+- 命令在系统沙箱（Seatbelt）内执行：只读命令禁网、只允许写当前目录与构建缓存，越界访问由内核直接拒绝
 - 后台任务有专属通知气泡（需要审批 / 完成 / 失败），样式与聊天气泡、台词气泡区分开
 - 气泡式聊天：不遮挡桌宠、限制最大高度、底色透明，可切换/新建/删除会话
 - 默认使用免 Key 的 Pollinations OpenAI 兼容接口，可切换 DeepSeek 或任意 OpenAI 兼容 API
@@ -146,6 +147,7 @@ cargo test --manifest-path src-tauri/Cargo.toml --lib agent::web -- --ignored
 | 休眠恢复检测 | 可行 | 可行 | 纯 `SystemTime` 时间差，无平台 API |
 | 设置与会话存储 | 可行 | 可行 | 路径来自 `app_config_dir()`（Windows 在 `%APPDATA%\com.deepfish.desktop-pet`，Linux 在 `~/.config/com.deepfish.desktop-pet`）；`0600` 权限只在 unix 生效，Windows 依赖用户目录 ACL |
 | 命令工具 `run_command` | **需要改代码** | 可行 | 现在固定用 `sh -c`，Windows 要改成 `cmd /c` 或 PowerShell；风险白名单（`ls`/`cat`/`grep`/`git status`）也是 POSIX 命令，Windows 原生没有 |
+| 命令沙箱（Seatbelt） | **无对应实现** | **无对应实现** | 依赖 macOS 的 `sandbox-exec`；其它平台会自动跳过沙箱（不会因此拒绝执行），但也就没有这层防护——移植时应对接 Windows Job Object/AppContainer 与 Linux 的 Landlock/seccomp |
 | `Accessory` 激活策略 | 不需要 | 不需要 | 已用 `#[cfg(target_os = "macos")]` 隔离 |
 
 ### 打包方式
@@ -230,7 +232,7 @@ deepfish-desktop-pet-macos/
 - 自定义 API 地址必须使用 HTTPS。
 - 模型请求由 Rust 后端发起，API Key 不暴露给页面脚本。
 - 设置（含 API Key）保存在 `~/Library/Application Support/com.deepfish.desktop-pet/settings.json`，文件权限为 `0600`，只有当前用户可读；旧版本存在系统钥匙串里的 Key 不会自动迁移，需要重新填写一次。
-- 会话历史保存在同一目录的 `agent/sessions.json`，只在本机；模型只能调用白名单工具，文件与命令访问被限制在用户主目录内，并按风险等级自动执行或要求确认（见下节）。
+- 会话历史保存在同一目录的 `agent/sessions.json`，只在本机；模型只能调用白名单工具，文件与命令访问被限制在用户主目录内，并按风险等级自动执行或要求确认（见下节）。命令默认还会套一层系统沙箱，越界的读写与未获批的联网会被内核直接拒绝。
 - 公共免费模型的请求会离开本机，请先阅读服务提供方条款。
 - 打开「联网搜索 / 网页抓取」后，模型发起的查询词和网页链接会被发送到 DeepSeek 的 `/v1/tools/*` 接口；不开启则这两个工具不会注册给模型。
 
@@ -251,16 +253,22 @@ deepfish-desktop-pet-macos/
   | `list_dir` | 列出主目录内某个目录 | 自动执行（敏感目录需审批） |
   | `read_file` | 读取主目录内文本文件（默认 200 行、单次最多 400 行 / 200 KB） | 自动执行（敏感目录需审批） |
   | `write_file` | 覆盖或新建文件，自动建父目录，单次上限 200 KB | **每次都要审批** |
-  | `run_command` | 在 `sh -c` 里执行命令，默认 15 s 超时、最长 600 s，输出截断到 6000 字符 | 只读命令自动执行，其它需审批 |
+  | `run_command` | 在 `sh -c` 里执行命令，默认在系统沙箱内，15 s 超时、最长 600 s，输出截断到 6000 字符 | 只读命令自动执行，其它需审批 |
   | `web_search` | DeepSeek 联网搜索，返回标题/链接/摘要（需在设置里开启） | 开启后自动执行 |
   | `web_fetch` | 抓取网页并转成 Markdown（需在设置里开启） | 开启后自动执行 |
 
-- **作用范围**：文件工具只能触碰 `$HOME` 之内（`~` / `~/x` 写法，`..` 逃逸会直接拒绝）；`DEEPFISH_TOOL_ROOT` 可整体收窄或放宽这个根目录。命令无法真正沙箱化，所以"超出主目录"的路径、重定向、命令替换、`&&`/`;` 一律升级为审批。
+- **作用范围**：文件工具只能触碰 `$HOME` 之内（`~` / `~/x` 写法，`..` 逃逸会直接拒绝）；`DEEPFISH_TOOL_ROOT` 可整体收窄或放宽这个根目录。"超出主目录"的路径、重定向、命令替换、`&&`/`;` 一律升级为审批。
 - **风险分级**（`src-tauri/src/agent/risk.rs`）：
   - **自动执行**：`web_search` / `web_fetch`（只有你在设置里打开开关时才会注册给模型）、`ls / pwd / cat / head / tail / wc / grep / rg / find / stat / du / df / jq / diff …` 这类只读命令，以及 `git status|diff|log|show|branch|rev-parse …`、`node --version`；管道里的每一段都必须是只读命令，且不能引用凭据路径。
   - **需要审批**：`write_file`、所有写操作、未知程序（`npm test`、`sed -i`、`find -delete`、`git push`、`rm -rf build`…），以及读取 `.ssh`、`.aws`、`.npmrc`、钥匙串、本应用设置等敏感路径。审批卡片出现在聊天里，显示将要执行的具体内容，`允许` / `拒绝` 二选一，**300 秒不点视为拒绝**；每次都问，不记忆。
   - **直接拒绝**：`sudo`/`su`、`shutdown`/`reboot`/`diskutil`/`mkfs`/`dd`、`security`（钥匙串命令行）、`launchctl`/`csrutil`/`nvram`/`tccutil`、`osascript`，以及 `curl`/`wget`/`ssh`/`scp`/`nc` 等外网与远程工具——避免读完本地文件再发出去。
 - **被拒绝之后**：模型会收到一条明确的工具结果（"用户拒绝了这次操作" / "该操作被安全策略禁止"），系统提示要求它不要重试同一调用，改换方式或直接说明做不到。
+- **命令沙箱**（`src-tauri/src/agent/sandbox.rs`，可在设置页关闭）：命令交给系统自带的 `/usr/bin/sandbox-exec` 执行，profile 以 `(deny default)` + Apple 的 `system.sb` 基线起步，因此不需要链接任何沙箱库，安装包体积不变。策略是：
+  - **可读**：`/bin`、`/usr`、`/System`、`/Library`、`/opt`、`/private/etc`、`/dev` 等系统路径，加上当前工作目录，以及主目录里**除凭据目录以外**的一切（`.ssh`、`.aws`、`.gnupg`、`.kube`、`.netrc`、`.npmrc`、`.config/gh`、`Library/Keychains`、`Library/Cookies`、`Library/Safari`、本应用配置目录按 `risk.rs` 的同一份 `SENSITIVE` 列表挖掉，`.config/gh` 这种只挖子目录，同级兄弟目录照常可读）。
+  - **可写**：只有当前工作目录、`/tmp` 与 `$TMPDIR`，以及 `~/Library/Caches`、`~/.cache`、`~/.npm`、`~/.cargo`、`~/.rustup`、`~/.yarn`、`~/.gradle`、`~/.m2` 等构建缓存——否则 `npm install` / `cargo build` 会因为 `EACCES` 失败。
+  - **联网**：只读命令（`ls`、`git status`…）完全禁网；需要审批的命令在用户点"允许"后才可以联网，审批卡片会写明「沙箱内，禁网」/「沙箱内，可联网」。
+  - **失败即拒绝**：`sandbox-exec` 缺失或 profile 无法应用时命令不会执行，而是回一条"沙箱不可用，请手动在终端运行"，绝不静默降级成无限制 shell。
+  - 沙箱只在 macOS 生效；`sandbox-exec` 自 10.8 起被标记为 deprecated，但目前在 macOS 26 上仍然可用。实测边界：写 `~/x`、读 `~/.ssh/*`、`ping`/`curl` 在禁网状态下都会得到 `Operation not permitted`，而 `ls`/`git status`/`node --version`/`npm --version`/`cat ~/.gitconfig` 正常。
 - **后台任务**：一次回复的多步执行完全在 Rust 侧（工具在阻塞线程池里跑，不会卡住其它会话的流式输出），关闭聊天、切换会话都不会打断；结果写入会话，重新打开即能看到。命令超时上限 600 s，工具循环与工具调用次数按设置页的「Agent 上限」执行（默认 50 轮 / 10 次），审批等待窗口 300 s。
 - **桌宠通知气泡**：后台任务不看聊天窗口也能知道进展——需要审批时宠物头顶弹出「🔐 需要审批 / 主人，有一个操作需要审批」，任务结束弹出「✅ 任务完成 / 主人，任务完成了」或「⚠ 任务失败 / 主人，任务失败了」。这个气泡是深色卡片、左侧彩色强调条、没有小尾巴，和聊天气泡、动作台词气泡都不一样；点它直接打开对应会话（需要审批时卡片已经在那儿等着）。聊天窗口正开着且就是该会话时不再弹气泡，避免重复打扰。
 
@@ -274,6 +282,7 @@ deepfish-desktop-pet-macos/
 - 只检测休眠恢复，不区分锁屏与解锁。
 - 穿透蒙版按窗口上次移动时的位置缓存，运行中改变显示器排列或缩放比例后需要重新拖动一次桌宠才能完全对齐。
 - 上下文预算按字符估算 token，与真实分词存在偏差；压缩质量取决于所用模型，免费模型偶尔会忽略工具调用。
+- 命令沙箱拦不住"用户自己批准了、且命令本身就在允许范围内"的破坏（例如在项目目录里 `rm -rf .`），也不隔离内核层漏洞；需要在沙箱里跑完整工具链（Docker、虚拟机）不在本项目的轻量定位内。
 - 未配置代码签名与公证，本地首次打开需右键“打开”；分发前请自行配置签名。
 - 界面代码当前与上游 Electron 版本各自维护，上游界面更新需要手动同步。
 
