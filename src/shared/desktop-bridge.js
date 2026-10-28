@@ -44,6 +44,14 @@
     },
     getSettings: () => call("get_settings"),
     saveSettings: (settings) => call("save_settings", { settings }),
+    /// Opens an http(s) link in the user's default browser.
+    openExternal: (url) => call("open_external", { url }),
+    /// Prefers a local NetEase / QQ Music client and falls back to the browser.
+    playMusic: (query, site, player) => call("play_music", { query, site, player }),
+    listReminders: () => call("list_reminders"),
+    addReminder: (text, minutes, at) =>
+      call("add_reminder", { text, minutes: minutes ?? null, at: at ?? null }),
+    removeReminder: (id) => call("remove_reminder", { id }),
     // Agent harness: sessions, context compaction and the tool loop live in Rust.
     agent: {
       listSessions: () => call("agent_sessions"),
@@ -73,6 +81,8 @@
     onSpeak: (callback) => subscribe("pet-speak", callback),
     onWake: (callback) => subscribe("wake-event", callback),
     onCommand: (callback) => subscribe("pet-command", callback),
-    onSettings: (callback) => subscribe("settings-updated", callback)
+    onSettings: (callback) => subscribe("settings-updated", callback),
+    onReminder: (callback) => subscribe("reminder-due", callback),
+    onFocus: (callback) => subscribe("focus-command", callback)
   };
 })(window);

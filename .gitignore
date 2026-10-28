@@ -10,5 +10,6 @@ src-tauri/gen/
 # but keep these patterns as insurance against copying it into the repo by hand.
 settings.json
 sessions.json
+reminders.json
 .env
 .env.*

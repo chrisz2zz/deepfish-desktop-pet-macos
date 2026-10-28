@@ -221,8 +221,18 @@ mod tests {
     #[test]
     #[ignore = "requires a real DeepSeek API key in the app settings"]
     fn live_search_and_fetch() {
-        let home = std::env::var("HOME").expect("HOME");
-        let path = format!("{home}/Library/Application Support/com.deepfish.desktop-pet/settings.json");
+        // `app_config_dir()` sits in %APPDATA% on Windows and in Application
+        // Support on macOS.
+        #[cfg(target_os = "windows")]
+        let path = format!(
+            "{}\\com.deepfish.desktop-pet\\settings.json",
+            std::env::var("APPDATA").expect("APPDATA")
+        );
+        #[cfg(not(target_os = "windows"))]
+        let path = format!(
+            "{}/Library/Application Support/com.deepfish.desktop-pet/settings.json",
+            std::env::var("HOME").expect("HOME")
+        );
         let text = std::fs::read_to_string(path).expect("settings.json");
         let value: Value = serde_json::from_str(&text).expect("valid settings json");
         let key = value["apiKey"].as_str().expect("apiKey").to_string();

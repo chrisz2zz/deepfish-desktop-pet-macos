@@ -24,7 +24,7 @@
           </div>
           <label class="field"><span>API 地址</span><input id="endpoint" name="endpoint" type="url" required></label>
           <label class="field"><span>模型名称</span><input id="model" name="model" required></label>
-          <label class="field" id="key-field"><span>API Key</span><input id="api-key" name="apiKey" type="password" autocomplete="new-password" placeholder="未填写"><small id="key-status"></small><small class="field-hint">只保存在本机配置文件中（权限 0600），不写入系统钥匙串，也不会申请访问其他密钥</small></label>
+          <label class="field" id="key-field"><span>API Key</span><input id="api-key" name="apiKey" type="password" autocomplete="new-password" placeholder="未填写"><small id="key-status"></small><small class="field-hint">只保存在本机配置文件中（仅当前用户可读），不写入系统钥匙串，也不会申请访问其他密钥</small></label>
           <label class="check"><input id="clear-key" type="checkbox"><span>清除已保存的 API Key</span></label>
           <div id="deepseek-tools" class="tool-toggles">
             <label class="check"><input id="deepseek-search" type="checkbox"><span>开启联网搜索（Search）</span></label>
@@ -45,6 +45,16 @@
         </section>
 
         <section>
+          <h2>陪伴与提醒</h2>
+          <label class="switch-row"><span><strong>健康提醒</strong><small>工作时段提醒喝水、起身活动；23:00 - 08:00 自动安静</small></span><input id="care-reminders" type="checkbox" checked></label>
+          <label class="field"><span>喝水间隔（分钟）</span><input id="water-every" type="number" min="10" max="180" step="5" required></label>
+          <label class="field"><span>起身活动间隔（分钟）</span><input id="move-every" type="number" min="10" max="240" step="5" required></label>
+          <label class="field"><span>专注时长（分钟）</span><input id="focus-minutes" type="number" min="5" max="120" step="5" required></label>
+          <label class="field"><span>音乐播放器</span><select id="music-player"><option value="auto">自动（优先本机客户端）</option><option value="netease">网易云音乐</option><option value="qq">QQ 音乐</option><option value="browser">系统浏览器</option></select></label>
+          <small class="field-hint">右键桌宠或托盘菜单可以开始专注、放点轻音乐、查看提醒；也可以在聊天里直接说“提醒我 20 分钟后开会”。放音乐时会优先调用本机已安装的网易云 / QQ 音乐。</small>
+        </section>
+
+        <section>
           <h2>Agent 上限</h2>
           <label class="field"><span>单次问答循环上限</span><input id="agent-loop-limit" type="number" min="1" max="200" step="1" required><small>一次提问里模型最多来回几轮，默认 50；到顶后会强制收尾，防止死循环</small></label>
           <label class="field"><span>单次问答工具调用上限</span><input id="tool-call-limit" type="number" min="1" max="100" step="1" required><small>一次提问里最多执行多少次工具，默认 10；超出后剩下的调用直接返回"超额度"给模型</small></label>
@@ -53,7 +63,7 @@
         <section>
           <h2>命令沙箱</h2>
           <label class="switch-row"><span><strong>在系统沙箱里执行命令</strong><small>只允许写当前目录、临时目录和构建缓存；只读命令禁止联网，需审批的命令才可以联网。关闭后命令直接以你的权限运行</small></span><input id="sandboxed-commands" type="checkbox" checked></label>
-          <small class="field-hint">沙箱由系统自带的 <code>sandbox-exec</code> 提供，仅 macOS 生效；沙箱不可用时会拒绝执行并提示手动运行，不会静默降级。</small>
+          <small id="sandbox-hint" class="field-hint">沙箱由系统自带的 <code>sandbox-exec</code> 提供，仅 macOS 生效；沙箱不可用时会拒绝执行并提示手动运行，不会静默降级。</small>
         </section>
 
         <p id="status" class="status" role="status"></p>

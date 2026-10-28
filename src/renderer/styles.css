@@ -128,6 +128,9 @@ input { font: inherit; }
 .speech.notice span { color: #f4f7ff; font-size: 13px; font-weight: 600; }
 .speech.notice.notice-done { --notice-accent: #47c07f; }
 .speech.notice.notice-done strong { color: #a9ecc6; }
+.speech.notice.notice-reminder { --notice-accent: #f2a63b; }
+.speech.notice.notice-focus { --notice-accent: #47c07f; }
+.speech.notice.notice-focus strong { color: #a9ecc6; }
 .speech.notice.notice-error { --notice-accent: #e2667d; }
 .speech.notice.notice-error strong { color: #ffb9c4; }
 
@@ -154,6 +157,30 @@ input { font: inherit; }
 }
 
 .pet-stage:active { cursor: grabbing; }
+
+.focus-badge {
+  position: absolute;
+  z-index: 7;
+  top: 2px;
+  left: 0;
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 2px 8px;
+  border: 1px solid rgba(255, 255, 255, 0.85);
+  border-radius: 999px;
+  background: rgba(255, 255, 255, 0.92);
+  color: #1f62c6;
+  font-size: 10px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  line-height: 1.4;
+  cursor: pointer;
+  box-shadow: 0 4px 12px rgba(17, 35, 78, 0.18);
+}
+
+.focus-badge[hidden] { display: none; }
+.focus-badge:hover { background: #fff; }
 
 .chat-fab {
   position: absolute;
@@ -182,6 +209,26 @@ input { font: inherit; }
   opacity: 1;
   transform: translateY(0);
   pointer-events: auto;
+}
+
+/* Windows turns the window click-through while the cursor crosses the empty
+   cells around the sprite, which also drops the stage hover; a fade-in button
+   would vanish under the cursor. Keep it visible and clickable there. */
+.pet-app[data-platform="windows"] .chat-fab {
+  opacity: 0.8;
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+.pet-app[data-platform="windows"] .chat-fab:hover {
+  opacity: 1;
+}
+
+/* The chat panel brings its own close button, so the FAB steps aside while it
+   is open. */
+.pet-app[data-platform="windows"] .chat-panel:not([hidden]) ~ .pet-stage .chat-fab {
+  opacity: 0;
+  pointer-events: none;
 }
 
 .chat-fab:hover { background: #fff; }
@@ -755,6 +802,64 @@ input { font: inherit; }
 }
 .message.error { background: rgba(255, 240, 240, 0.94); color: #a42d35; }
 .message.streaming::after { content: "▍"; margin-left: 2px; animation: caret-blink 0.9s steps(2) infinite; }
+
+/* Markdown replies. The bubble normally uses `pre-wrap`, which would add line
+   breaks around block elements, so markdown messages reset it and space their
+   blocks with margins that fit the short log. */
+.message.markdown { white-space: normal; }
+.message.markdown > :first-child { margin-top: 0; }
+.message.markdown > :last-child { margin-bottom: 0; }
+.message.markdown p { margin: 0 0 5px; }
+.message.markdown h1,
+.message.markdown h2,
+.message.markdown h3,
+.message.markdown h4,
+.message.markdown h5,
+.message.markdown h6 {
+  margin: 6px 0 3px;
+  font-size: 12px;
+  line-height: 1.4;
+}
+.message.markdown h1 { font-size: 14px; }
+.message.markdown h2 { font-size: 13px; }
+.message.markdown ul,
+.message.markdown ol { margin: 2px 0 5px; padding-left: 18px; }
+.message.markdown li { margin: 1px 0; }
+.message.markdown code {
+  padding: 1px 4px;
+  border-radius: 4px;
+  background: rgba(40, 118, 232, 0.1);
+  font-family: ui-monospace, "Cascadia Mono", Consolas, monospace;
+  font-size: 11px;
+}
+.message.markdown pre {
+  margin: 4px 0;
+  padding: 7px 9px;
+  border-radius: 9px;
+  background: rgba(20, 35, 80, 0.07);
+  overflow-x: auto;
+  white-space: pre;
+}
+.message.markdown pre code { padding: 0; background: none; font-size: 11px; }
+.message.markdown blockquote {
+  margin: 3px 0;
+  padding-left: 8px;
+  border-left: 2px solid rgba(40, 118, 232, 0.35);
+  color: #46527a;
+}
+.message.markdown blockquote > :last-child { margin-bottom: 0; }
+.message.markdown a {
+  color: #1f62c6;
+  text-decoration: underline;
+  text-underline-offset: 2px;
+  cursor: pointer;
+}
+.message.markdown hr {
+  margin: 6px 0;
+  border: 0;
+  border-top: 1px solid rgba(20, 35, 80, 0.16);
+}
+.message.markdown del { opacity: 0.7; }
 .chat-form { display: grid; grid-template-columns: 1fr auto; gap: 6px; align-items: end; }
 .chat-form textarea {
   min-width: 0;

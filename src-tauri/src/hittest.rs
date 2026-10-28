@@ -69,6 +69,19 @@ struct HitTestState {
     mask: HitMask,
     frame: WindowFrame,
     screen_height: f64,
+    /// Scale factor of the display the window is on. The cached frame is in
+    /// logical points, while Win32 reports the cursor in physical pixels.
+    scale: f64,
+}
+
+impl HitTestState {
+    fn scale(&self) -> f64 {
+        if self.scale > 0.0 {
+            self.scale
+        } else {
+            1.0
+        }
+    }
 }
 
 pub struct ClickThrough {
@@ -102,6 +115,12 @@ impl ClickThrough {
         };
     }
 
+    pub fn set_scale(&self, scale: f64) {
+        if scale.is_finite() && scale > 0.0 {
+            self.lock().scale = scale;
+        }
+    }
+
     pub fn set_screen_height(&self, height: f64) {
         self.lock().screen_height = height;
     }
@@ -113,7 +132,8 @@ impl ClickThrough {
     }
 
     fn cursor(&self) -> Option<(f64, f64)> {
-        cursor_points(self.lock().screen_height)
+        let state = self.lock();
+        cursor_points(state.screen_height, state.scale())
     }
 
     /// True while the cursor sits on a pixel of the sprite, or while the mask is
@@ -146,7 +166,7 @@ impl ClickThrough {
 /// Cursor position in the same point-based screen space as the cached frame,
 /// i.e. with the origin at the top-left of the main display.
 #[cfg(target_os = "macos")]
-fn cursor_points(screen_height: f64) -> Option<(f64, f64)> {
+fn cursor_points(screen_height: f64, _scale: f64) -> Option<(f64, f64)> {
     if screen_height <= 0.0 {
         return None;
     }
@@ -155,8 +175,25 @@ fn cursor_points(screen_height: f64) -> Option<(f64, f64)> {
     Some((mouse.x, screen_height - mouse.y))
 }
 
-#[cfg(not(target_os = "macos"))]
-fn cursor_points(_screen_height: f64) -> Option<(f64, f64)> {
+/// Win32 reports the cursor in physical pixels of the virtual screen, whose
+/// origin is the top-left of the primary display, so it is divided back into
+/// the logical points the cached frame uses.
+#[cfg(target_os = "windows")]
+fn cursor_points(_screen_height: f64, scale: f64) -> Option<(f64, f64)> {
+    use windows_sys::Win32::Foundation::POINT;
+    use windows_sys::Win32::UI::WindowsAndMessaging::GetCursorPos;
+
+    let mut point = POINT { x: 0, y: 0 };
+    // SAFETY: `GetCursorPos` only writes to the `POINT` passed in.
+    if unsafe { GetCursorPos(std::ptr::addr_of_mut!(point)) } == 0 {
+        return None;
+    }
+    let scale = if scale > 0.0 { scale } else { 1.0 };
+    Some((f64::from(point.x) / scale, f64::from(point.y) / scale))
+}
+
+#[cfg(not(any(target_os = "macos", target_os = "windows")))]
+fn cursor_points(_screen_height: f64, _scale: f64) -> Option<(f64, f64)> {
     None
 }
 
@@ -227,10 +264,17 @@ mod tests {
     #[test]
     fn points_outside_the_window_never_capture() {
         let state = click_through(&[0], 4, 4, 10.0);
-        state.set_frame(100.0, 200.0, 40.0, 40.0);
+        // A frame nowhere near the real cursor.
+        state.set_frame(-10_000.0, -10_000.0, 40.0, 40.0);
         state.set_screen_height(0.0);
-        // Without a screen height the platform cursor is unavailable, so the
-        // window stays interactive rather than silently losing all clicks.
-        assert!(state.contains_cursor());
+        if cursor_points(0.0, 1.0).is_some() {
+            // Win32 needs no screen height, so the far-away frame is simply
+            // reported as "not on the pet".
+            assert!(!state.contains_cursor());
+        } else {
+            // Without a screen height the macOS cursor is unavailable, so the
+            // window stays interactive rather than silently losing all clicks.
+            assert!(state.contains_cursor());
+        }
     }
 }

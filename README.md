@@ -1,6 +1,6 @@
-# 蓝色大肥鱼桌宠（macOS / Tauri 2）
+# 蓝色大肥鱼桌宠（macOS / Windows，Tauri 2）
 
-一只基于蓝色大肥鱼意象进行二次创作的 macOS 桌面宠物，使用 Tauri 2 + Rust 实现，是从 [deepfish-desktop-pet](https://github.com/Dolphin2026-stl/deepfish-desktop-pet)（Electron / Windows 版）独立出来的 macOS 版本。
+一只基于蓝色大肥鱼意象进行二次创作的桌面宠物，使用 Tauri 2 + Rust 实现，是从 [deepfish-desktop-pet](https://github.com/Dolphin2026-stl/deepfish-desktop-pet)（Electron / Windows 版）独立出来的 macOS 版本，现已适配 Windows。
 
 她会跟随本地时间作息，能被拖动、点击、投喂和摸头，也会在你从休眠回来时随机伸懒腰或被惊醒。
 
@@ -23,35 +23,50 @@
 - 命令在系统沙箱（Seatbelt）内执行：只读命令禁网、只允许写当前目录与构建缓存，越界访问由内核直接拒绝
 - 后台任务有专属通知气泡（需要审批 / 完成 / 失败），样式与聊天气泡、台词气泡区分开
 - 气泡式聊天：不遮挡桌宠、限制最大高度、底色透明，可切换/新建/删除会话；输入框支持多行，`Enter` 发送、`Shift+Enter` 换行
+- 回复支持 Markdown：标题、列表、引用、加粗/斜体、行内代码与代码块；链接用系统默认浏览器打开，链接只允许 http(s)
+- 健康关怀：按设定间隔提醒喝水、起身活动，23:00 - 08:00 自动安静；可在设置里开关并调整间隔
+- 日程提醒：在聊天里说“提醒我 20 分钟后开会”即可创建，到点桌宠弹出提醒；右键 / 托盘菜单可查看待办
+- 专注计时：右键 / 托盘菜单开始或结束番茄钟，桌宠安静陪伴，结束时提醒休息、喝水
+- 轻音乐：右键 / 托盘菜单放点 lofi；优先调用本机已安装的网易云 / QQ 音乐（网易云会先搜索并尝试直接播放），找不到客户端再用浏览器；设置里可指定播放器
 - 默认使用免 Key 的 Pollinations OpenAI 兼容接口，可切换 DeepSeek 或任意 OpenAI 兼容 API
 - 可选开启 DeepSeek 的联网搜索（Search）与网页抓取（Fetch），让桌宠能查实时信息
-- API Key 只保存在本机的设置文件里（权限 0600），不写入系统钥匙串，避免申请访问其他密钥的权限
+- API Key 只保存在本机的设置文件里（macOS / Linux 下权限 0600，Windows 依赖用户目录 ACL），不写入系统钥匙串，避免申请访问其他密钥的权限
 
 ## 环境要求
+
+macOS（主要开发平台）：
 
 - macOS 10.15 或更高版本
 - Xcode Command Line Tools：`xcode-select --install`
 - Rust stable：<https://rustup.rs>
 - Node.js 20 或更高版本（`npm test` 使用内置的 `node --test`）
 
-以上仅针对 macOS；在 Windows / Linux 上构建的可行性分析、打包命令与未验证风险见 [Windows / Linux 可行性与打包](#windows--linux-可行性与打包)。
+Windows（代码已适配，冒烟测试通过）：
+
+- Windows 10 1803+ / Windows 11，WebView2 Runtime（系统通常自带）
+- Rust MSVC 工具链 + Visual Studio Build Tools（C++ 桌面开发）
+- Node.js 20 或更高版本
+
+Linux 仍未经真机验证，构建思路与注意事项见 [Windows / Linux 可行性与打包](#windows--linux-可行性与打包)。
 
 ## 快速开始
 
 ```bash
 npm install
-npm run dev      # 开发模式：透明置顶窗口 + 菜单栏图标
-npm run build    # 打包 .app 与 .dmg
+npm run dev      # 开发模式：透明置顶窗口 + 菜单栏 / 托盘图标
+npm run build    # 打包安装包（macOS: .app + .dmg，Windows: NSIS 安装器）
+npm run smoke    # 端到端冒烟测试（自动挑当前平台的产物或调试程序）
 ```
 
 构建产物：
 
-- `src-tauri/target/release/bundle/macos/大肥鱼桌宠.app`
-- `src-tauri/target/release/bundle/dmg/大肥鱼桌宠_<版本>_<架构>.dmg`
+- macOS：`src-tauri/target/release/bundle/macos/大肥鱼桌宠.app`
+- macOS：`src-tauri/target/release/bundle/dmg/大肥鱼桌宠_<版本>_<架构>.dmg`
+- Windows：`src-tauri/target/release/bundle/nsis/大肥鱼桌宠_<版本>_x64-setup.exe`
 
 两个命令都会先执行 `npm run web:prepare`，把 `src/renderer`、`src/shared` 与 `assets` 复制到 `build/web`，作为 Tauri 的静态资源根目录。
 
-应用以 `Accessory` 激活策略运行（`Info.plist` 同时设置了 `LSUIElement`）：只在菜单栏显示图标，不占用 Dock。退出请使用菜单栏或右键菜单中的“退出大肥鱼”。
+macOS 上应用以 `Accessory` 激活策略运行（`Info.plist` 同时设置了 `LSUIElement`）：只在菜单栏显示图标，不占用 Dock；Windows 上则只显示托盘图标并隐藏任务栏按钮。退出请使用菜单栏 / 托盘或右键菜单中的“退出大肥鱼”。
 
 ## 交互方式
 
@@ -66,6 +81,7 @@ npm run build    # 打包 .app 与 .dmg
 | 按住拖动 | 移动桌宠，松手后给出拖拽反馈；可以一直拖到屏幕顶端（窗口上方的气泡带允许溢出屏幕边缘），也能拖到其它显示器 |
 | 快速绕圈拖动 | 松手后触发晕眩、转圈星星与专属台词 |
 | 右键 | 回应“干嘛？”并打开原生菜单 |
+| 右键 / 托盘菜单 | 开始 / 结束专注、放点轻音乐、看看接下来的提醒 |
 | `Enter` / 空格 | 聚焦宠物后打开聊天 |
 | 点击通知气泡 | 打开对应会话（后台任务需要审批时卡片已在其中） |
 | 聊天输入 | 多行输入框：`Enter` 发送，`Shift+Enter` 换行，输入框随内容长高（最多约 4 行） |
@@ -110,14 +126,14 @@ npm run build    # 打包 .app 与 .dmg
 npm test           # Node 内置测试：作息、行为目录、手势与平台桥接
 npm run test:rust  # Rust 测试：会话存储、上下文压缩、风险分级、工具执行、SSE 解析与设置校验
 npm run check      # 检查关键文件存在且脚本语法有效
-npm run smoke      # 启动已打包的 .app 做端到端自检（需先 npm run build；
+npm run smoke      # 启动已打包的程序做端到端自检（需先 npm run build；
                    # 也可以 DEEPFISH_BINARY=src-tauri/target/debug/deepfish-desktop-pet npm run smoke 用调试版跑）
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 ```
 
 Rust 侧在 `Cargo.toml` 的 `[lints.clippy]` 里开了 pedantic（放开了数值转换、文档必填、Tauri 命令参数必须 owned 这几类噪音），因此 `-D warnings` 应该保持零警告。
 
-`npm run smoke` 会把结果写入 `work/smoke-macos/`，校验桌宠帧是否加载、`window.deepFish` 桥接是否可用、气泡聊天与流式接口是否就绪、穿透点击蒙版是否上报、设置窗口是否渲染并能经 Rust 后端保存设置，然后自动退出。
+`npm run smoke` 会把结果写入 `work/smoke-<平台>/`（例如 Windows 上是 `work/smoke-windows/`），校验桌宠帧是否加载、`window.deepFish` 桥接是否可用、气泡聊天与流式接口是否就绪、穿透点击蒙版是否上报、设置窗口是否渲染并能经 Rust 后端保存设置，然后自动退出。
 
 需要联网验证真实模型请求时：
 
@@ -134,35 +150,34 @@ cargo test --manifest-path src-tauri/Cargo.toml --lib agent::web -- --ignored
 
 ## Windows / Linux 可行性与打包
 
-> ⚠️ **本项目只在 macOS 上开发和验证过。Windows 与 Linux 版本没有在真实设备上运行验证过**，下面是根据代码判断的迁移可行性，不保证开箱即用。实际效果很可能需要针对性修改，欢迎在对应平台上测试并提 PR。
+> Windows 的代码路径已经适配（穿透点击、命令执行、路径与凭据规则、NSIS 打包），并在 Windows 上跑过冒烟测试；Linux 仍未在真机上验证。下面分别列出两端的现状与剩余风险。
 
 ### 代码层面现状
 
 | 能力 | Windows | Linux | 说明 |
 | --- | --- | --- | --- |
-| 构建（Tauri 2 + Rust + 原生 HTML/JS） | 可行 | 可行 | 前端没有 macOS 专属代码；`objc2-app-kit` 依赖只在 `[target.'cfg(target_os = "macos")']` 下编译 |
-| 透明、无边框、置顶、隐藏任务栏 | 大概率可行 | 取决于合成器 | 窗口已是 `transparent + decorations:false`；Linux 需要合成器（X11 + picom / KWin 等），Wayland 下透明与穿透行为不可控 |
-| 按立绘轮廓穿透点击 | **未实现** | **未实现** | 光标查询只有 macOS 实现（`NSEvent.mouseLocation`），其它平台 `cursor_points()` 返回 `None`，整窗保持可点击——透明区域会挡住后面的窗口。移植思路：Windows 用 `GetCursorPos` + `WS_EX_TRANSPARENT`/`SetWindowRgn`，Linux X11 用 `XQueryPointer` + shape 扩展（Wayland 无对应能力） |
-| 拖动、自动散步、跨屏夹取 | 可行 | 可行 | 只用 `outer_position` / `set_position` / `available_monitors` |
-| 菜单栏 / 托盘图标 | 可行 | 依赖 libayatana-appindicator | 托盘图标用 `icons/tray.png`；GNOME 需要装 AppIndicator 扩展才显示 |
+| 构建（Tauri 2 + Rust + 原生 HTML/JS） | 已验证 | 可行 | 前端没有平台专属代码；`objc2` 与 `windows-sys` 依赖都按 `cfg(target_os)` 隔离 |
+| 透明、无边框、置顶、隐藏任务栏 | 已验证 | 取决于合成器 | 窗口已是 `transparent + decorations:false`；Linux 需要合成器（X11 + picom / KWin 等），Wayland 下透明与穿透行为不可控 |
+| 按立绘轮廓穿透点击 | 已验证 | **未实现** | macOS 用 `NSEvent.mouseLocation`，Windows 用 `GetCursorPos` + `set_ignore_cursor_events`（并按窗口 DPI 换算到逻辑坐标）；Linux 需要 `XQueryPointer` + shape 扩展（Wayland 无对应能力），目前整窗保持可点击 |
+| 拖动、自动散步、跨屏夹取 | 已验证 | 可行 | 只用 `outer_position` / `set_position` / `available_monitors` |
+| 菜单栏 / 托盘图标 | 已验证 | 依赖 libayatana-appindicator | 托盘图标用 `icons/tray.png`；GNOME 需要装 AppIndicator 扩展才显示 |
 | 休眠恢复检测 | 可行 | 可行 | 纯 `SystemTime` 时间差，无平台 API |
-| 设置与会话存储 | 可行 | 可行 | 路径来自 `app_config_dir()`（Windows 在 `%APPDATA%\com.deepfish.desktop-pet`，Linux 在 `~/.config/com.deepfish.desktop-pet`）；`0600` 权限只在 unix 生效，Windows 依赖用户目录 ACL |
-| 命令工具 `run_command` | **需要改代码** | 可行 | 现在固定用 `sh -c`，Windows 要改成 `cmd /c` 或 PowerShell；风险白名单（`ls`/`cat`/`grep`/`git status`）也是 POSIX 命令，Windows 原生没有 |
-| 命令沙箱（Seatbelt） | **无对应实现** | **无对应实现** | 依赖 macOS 的 `sandbox-exec`；其它平台会自动跳过沙箱（不会因此拒绝执行），但也就没有这层防护——移植时应对接 Windows Job Object/AppContainer 与 Linux 的 Landlock/seccomp |
+| 设置与会话存储 | 已验证 | 可行 | 路径来自 `app_config_dir()`（Windows 在 `%APPDATA%\com.deepfish.desktop-pet`，Linux 在 `~/.config/com.deepfish.desktop-pet`）；`0600` 权限只在 unix 生效，Windows 依赖用户目录 ACL |
+| 命令工具 `run_command` | 已验证 | 可行 | macOS / Linux 用 `sh -c`，Windows 用 `cmd /C`（先把控制台切到 UTF-8）；风险白名单同时包含 POSIX 与 cmd 的只读命令，路径分隔符、`.exe/.com/.bat/.cmd` 后缀与大小写都做了归一 |
+| 命令沙箱（Seatbelt） | **无对应实现** | **无对应实现** | 依赖 macOS 的 `sandbox-exec`；其它平台会自动跳过沙箱（不会因此拒绝执行），设置窗口里该开关会被禁用并说明原因 |
 | `Accessory` 激活策略 | 不需要 | 不需要 | 已用 `#[cfg(target_os = "macos")]` 隔离 |
 
 ### 打包方式
 
-Tauri **不支持交叉编译安装包**，需要在目标系统上各构建一次（或在 CI 里跑矩阵）。两个平台都需要先把 `src-tauri/tauri.conf.json` 里的 `bundle.targets` 从当前的 `["app", "dmg"]` 改成目标格式。
+Tauri **不支持交叉编译安装包**，需要在目标系统上各构建一次（或在 CI 里跑矩阵）。macOS 的 `bundle.targets` 保持 `["app", "dmg"]`；Windows 由 `src-tauri/tauri.windows.conf.json` 自动覆盖为 NSIS（当前用户安装，无需管理员权限）。
 
 **Windows**
 
 ```bash
 # 依赖：Rust MSVC 工具链、Visual Studio Build Tools（C++ 桌面开发）、WebView2 Runtime（Win10 1803+ 通常自带）
-# bundle.targets 改成 ["nsis"]（msi 需要额外装 WiX）
 npm install
-npx tauri build --bundles nsis
-# 产物：src-tauri/target/release/bundle/nsis/*-setup.exe（msi 在 bundle/msi/）
+npm run build
+# 产物：src-tauri/target/release/bundle/nsis/*-setup.exe
 ```
 
 **Linux（Debian / Ubuntu）**
@@ -170,7 +185,7 @@ npx tauri build --bundles nsis
 ```bash
 sudo apt update && sudo apt install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
   libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
-# bundle.targets 改成 ["deb", "appimage"]
+# bundle.targets 改成 ["deb", "appimage"]（可新建 tauri.linux.conf.json）
 npm install
 npx tauri build --bundles deb,appimage
 # 产物：bundle/deb/*.deb 与 bundle/appimage/*.AppImage（AppImage 运行需要 libfuse2）
@@ -198,11 +213,12 @@ jobs:
 ### 未验证的风险点
 
 - 透明窗口在 Windows 上可能出现过黑/整窗不透明（需要无边框 + DWM 合成），Linux 无合成器时干脆不透明。
-- 穿透点击在非 macOS 上不生效，桌宠的透明区域会挡住后面窗口的点击。
-- 高 DPI 缩放（150% / 200%）下气泡位置与 `--pet-height` 计算没有校准，可能偏移。
+- Windows 的高 DPI（125% / 150% / 200%）下穿透点击已按窗口缩放换算，但气泡位置与 `--pet-height` 仍未在多种缩放下逐一校准，可能偏移。
 - 中文字体回退（缺 `PingFang SC` / 微软雅黑时）可能影响气泡排版。
-- 命令工具与风险分级按 POSIX 假设编写，Windows 上要适配。
+- Windows 与 Linux 都没有命令沙箱：需要审批的命令会以当前用户权限直接运行，只应执行可信命令。
+- 自动散步与拖拽依赖窗口物理坐标，Windows 多显示器 + 混合 DPI 下的极端组合仍建议手动验证。
 - 托盘图标在部分桌面环境（尤其 Wayland）可能不显示。
+- Linux 仍未在真机上验证；穿透点击在 Linux 上尚未实现。
 
 ## 项目结构
 
@@ -233,7 +249,7 @@ deepfish-desktop-pet-macos/
 - 自定义 API 地址必须使用 HTTPS。
 - 模型请求由 Rust 后端发起，API Key 不暴露给页面脚本。
 - 设置（含 API Key）保存在 `~/Library/Application Support/com.deepfish.desktop-pet/settings.json`，文件权限为 `0600`，只有当前用户可读；旧版本存在系统钥匙串里的 Key 不会自动迁移，需要重新填写一次。
-- 会话历史保存在同一目录的 `agent/sessions.json`，只在本机；模型只能调用白名单工具，文件与命令访问被限制在用户主目录内，并按风险等级自动执行或要求确认（见下节）。命令默认还会套一层系统沙箱，越界的读写与未获批的联网会被内核直接拒绝。
+- 会话历史保存在同一目录的 `agent/sessions.json`，日程提醒保存在 `reminders.json`，都只在本机；模型只能调用白名单工具，文件与命令访问被限制在用户主目录内，并按风险等级自动执行或要求确认（见下节）。命令默认还会套一层系统沙箱，越界的读写与未获批的联网会被内核直接拒绝。
 - 公共免费模型的请求会离开本机，请先阅读服务提供方条款。
 - 打开「联网搜索 / 网页抓取」后，模型发起的查询词和网页链接会被发送到 DeepSeek 的 `/v1/tools/*` 接口；不开启则这两个工具不会注册给模型。
 
@@ -251,6 +267,9 @@ deepfish-desktop-pet-macos/
   | 工具 | 能力 | 默认风险 |
   | --- | --- | --- |
   | `get_time` / `pet_behavior` / `pet_say` / `open_settings` / `rename_session` | 桌宠自身：时间、18 种动作白名单、气泡台词、打开设置、改标题 | 自动执行 |
+  | `add_reminder` / `list_reminders` / `cancel_reminder` | 日程提醒：按相对分钟或本地时间创建，到点由桌宠弹出（`reminders.json`，最多 200 条） | 自动执行 |
+  | `play_music` | 优先调用本机网易云 / QQ 音乐；没有客户端时用浏览器打开搜索页（`player` 可选 auto / netease / qq / browser） | 自动执行 |
+  | `focus_session` | 开始或结束专注计时（番茄钟，5-120 分钟） | 自动执行 |
   | `list_dir` | 列出主目录内某个目录 | 自动执行（敏感目录需审批） |
   | `read_file` | 读取主目录内文本文件（默认 200 行、单次最多 400 行 / 200 KB） | 自动执行（敏感目录需审批） |
   | `write_file` | 覆盖或新建文件，自动建父目录，单次上限 200 KB | **每次都要审批** |

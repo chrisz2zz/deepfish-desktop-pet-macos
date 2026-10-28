@@ -443,6 +443,7 @@ async fn run_loop(
             deepseek && settings.deepseek_search,
             deepseek && settings.deepseek_fetch,
             settings.sandboxed_commands,
+            settings.music_player.clone(),
         );
         let tools = use_tools.then(|| tools::specs(&tool_context));
         let body = chat::payload(settings, messages, tools, true, MAX_REPLY_TOKENS);

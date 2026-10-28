@@ -29,6 +29,16 @@ pub struct Settings {
     pub interactive_zones: bool,
     pub spicy_lines: bool,
     pub behavior_intensity: f64,
+    /// Gentle water / stretch reminders during the working day.
+    pub care_reminders: bool,
+    /// Minutes between water reminders.
+    pub water_every_min: u32,
+    /// Minutes between stand-up reminders.
+    pub move_every_min: u32,
+    /// Default length of a focus session, in minutes.
+    pub focus_minutes: u32,
+    /// `auto`, `netease`, `qq` or `browser`.
+    pub music_player: String,
     /// How many model round-trips one user question may take.
     pub agent_loop_limit: u32,
     /// How many tool calls one user question may spend in total.
@@ -56,6 +66,11 @@ impl Default for Settings {
             interactive_zones: true,
             spicy_lines: true,
             behavior_intensity: 1.0,
+            care_reminders: true,
+            water_every_min: 50,
+            move_every_min: 80,
+            focus_minutes: 25,
+            music_player: "auto".to_string(),
             agent_loop_limit: DEFAULT_AGENT_LOOP_LIMIT,
             tool_call_limit: DEFAULT_TOOL_CALL_LIMIT,
             deepseek_search: false,
@@ -87,6 +102,11 @@ pub struct SettingsPatch {
     pub interactive_zones: Option<bool>,
     pub spicy_lines: Option<bool>,
     pub behavior_intensity: Option<f64>,
+    pub care_reminders: Option<bool>,
+    pub water_every_min: Option<u32>,
+    pub move_every_min: Option<u32>,
+    pub focus_minutes: Option<u32>,
+    pub music_player: Option<String>,
     pub agent_loop_limit: Option<u32>,
     pub tool_call_limit: Option<u32>,
     pub deepseek_search: Option<bool>,
@@ -162,6 +182,21 @@ impl SettingsStore {
         if let Some(value) = patch.behavior_intensity {
             self.data.behavior_intensity = value;
         }
+        if let Some(value) = patch.care_reminders {
+            self.data.care_reminders = value;
+        }
+        if let Some(value) = patch.water_every_min {
+            self.data.water_every_min = value;
+        }
+        if let Some(value) = patch.move_every_min {
+            self.data.move_every_min = value;
+        }
+        if let Some(value) = patch.focus_minutes {
+            self.data.focus_minutes = value;
+        }
+        if let Some(value) = patch.music_player {
+            self.data.music_player = value;
+        }
         if let Some(value) = patch.agent_loop_limit {
             self.data.agent_loop_limit = value;
         }
@@ -180,6 +215,14 @@ impl SettingsStore {
 
         self.data.scale = clamp(self.data.scale, 0.6, 1.15);
         self.data.behavior_intensity = clamp(self.data.behavior_intensity, 0.5, 1.8);
+        self.data.water_every_min = self.data.water_every_min.clamp(10, 180);
+        self.data.move_every_min = self.data.move_every_min.clamp(10, 240);
+        self.data.focus_minutes = self.data.focus_minutes.clamp(5, 120);
+        let player = self.data.music_player.trim().to_ascii_lowercase();
+        self.data.music_player = match player.as_str() {
+            "netease" | "qq" | "browser" => player,
+            _ => "auto".to_string(),
+        };
         self.data.agent_loop_limit = self.data.agent_loop_limit.clamp(1, MAX_AGENT_LOOP_LIMIT);
         self.data.tool_call_limit = self.data.tool_call_limit.clamp(1, MAX_TOOL_CALL_LIMIT);
 
@@ -390,6 +433,39 @@ mod tests {
         // Survives a reload from disk.
         let reloaded = SettingsStore::load(&dir);
         assert!(reloaded.data.deepseek_search && reloaded.data.deepseek_fetch);
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn care_reminders_round_trip_and_clamp() {
+        let dir = std::env::temp_dir().join(format!("deepfish-care-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let mut store = SettingsStore::load(&dir);
+        assert!(store.data.care_reminders);
+        assert_eq!(store.data.water_every_min, 50);
+        assert_eq!(store.data.move_every_min, 80);
+        assert_eq!(store.data.focus_minutes, 25);
+
+        let saved = store
+            .save(SettingsPatch {
+                care_reminders: Some(false),
+                water_every_min: Some(1),
+                move_every_min: Some(9_999),
+                focus_minutes: Some(1),
+                music_player: Some(" QQ ".to_string()),
+                ..SettingsPatch::default()
+            })
+            .unwrap();
+        assert!(!saved.settings.care_reminders);
+        assert_eq!(saved.settings.water_every_min, 10);
+        assert_eq!(saved.settings.move_every_min, 240);
+        assert_eq!(saved.settings.focus_minutes, 5);
+        assert_eq!(saved.settings.music_player, "qq");
+
+        let reloaded = SettingsStore::load(&dir);
+        assert!(!reloaded.data.care_reminders);
+        assert_eq!(reloaded.data.focus_minutes, 5);
+        assert_eq!(reloaded.data.music_player, "qq");
         fs::remove_dir_all(dir).ok();
     }
 

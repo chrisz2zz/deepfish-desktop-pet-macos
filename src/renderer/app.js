@@ -11,6 +11,8 @@ const chatForm = document.querySelector("#chat-form");
 const chatInput = document.querySelector("#chat-input");
 const chatClose = document.querySelector("#chat-close");
 const chatFab = document.querySelector("#chat-fab");
+const focusBadge = document.querySelector("#focus-badge");
+const focusTime = document.querySelector("#focus-time");
 const providerLabel = document.querySelector("#provider-label");
 const sessionButton = document.querySelector("#session-button");
 const sessionTitle = document.querySelector("#session-title");
@@ -20,8 +22,17 @@ const sessionItems = document.querySelector("#session-items");
 const sessionNew = document.querySelector("#session-new");
 const sessionCompact = document.querySelector("#session-compact");
 
+// Windows turns the window click-through while the cursor crosses transparent
+// cells around the sprite and then stops updating `:hover`, which used to leave
+// the chat button invisible and unclickable. The flag lets styles.css keep it
+// visible and hit-testable there.
+if (/Windows/.test(navigator.userAgent)) appRoot.dataset.platform = "windows";
+
 const behaviorApi = window.DeepFishBehaviors;
 const gestureApi = window.DeepFishGestures;
+const markdownApi = window.DeepFishMarkdown;
+const careApi = window.DeepFishCare;
+const CARE_STORAGE_KEY = "deepfish.care.v1";
 const frameAliases = { dream: "sleep", dizzy: "shock" };
 const frameSequences = {
   ciallo: { names: ["ciallo", "ciallo-b"], interval: 420 }
@@ -75,6 +86,8 @@ let sessionSummaries = [];
 let requestSequence = 0;
 let running = false;
 let pendingAssistant = null;
+let pendingAssistantText = "";
+let pendingRender = 0;
 let noticeTimer;
 /// Approval cards that are still waiting for the user, kept so reopening the
 /// panel re-renders them.
@@ -82,6 +95,9 @@ const pendingApprovals = new Map();
 let armedRemoval = "";
 let armTimer = 0;
 let summaryExpanded = false;
+let careState = null;
+let focusEndsAt = 0;
+let focusTimer = 0;
 
 function randomOf(items) {
   return items[Math.floor(Math.random() * items.length)];
@@ -215,10 +231,13 @@ function sampleAlpha(map, u, v) {
 
 function interactiveRects() {
   const rects = [];
+  if (!focusBadge.hidden) rects.push(focusBadge.getBoundingClientRect());
   if (!chatPanel.hidden) {
     rects.push(chatPanel.getBoundingClientRect());
     if (!sessionList.hidden) rects.push(sessionList.getBoundingClientRect());
-  } else if (appRoot.matches(":hover")) {
+  } else if (appRoot.dataset.platform === "windows" || appRoot.matches(":hover")) {
+    // Windows drops the hover state when the window turns click-through, so the
+    // button keeps its own hit area there instead of relying on `:hover`.
     rects.push(chatFab.getBoundingClientRect());
   }
   if (speech.classList.contains("visible")) rects.push(speech.getBoundingClientRect());
@@ -353,19 +372,34 @@ function say(text, label, duration = 4200) {
   }, duration);
 }
 
-const NOTICE_TITLES = { approval: "🔐 需要审批", done: "✅ 任务完成", error: "⚠ 任务失败" };
+const NOTICE_TITLES = {
+  approval: "🔐 需要审批",
+  done: "✅ 任务完成",
+  error: "⚠ 任务失败",
+  reminder: "⏰ 日程提醒",
+  focus: "🍅 专注结束"
+};
 
 /// A background-task notification. Visually distinct from the chat bubbles and
 /// the idle speech bubble: dark card, no tail, clickable, one line of text.
 function notify(kind, message, options = {}) {
   clearTimeout(speechTimer);
   clearTimeout(noticeTimer);
-  speech.classList.remove("visible", "notice", "notice-approval", "notice-done", "notice-error");
+  speech.classList.remove(
+    "visible",
+    "notice",
+    "notice-approval",
+    "notice-done",
+    "notice-error",
+    "notice-reminder",
+    "notice-focus"
+  );
   speech.classList.add("notice", `notice-${kind}`);
   phaseLabel.textContent = NOTICE_TITLES[kind] || "";
   speechText.textContent = message;
+  speech.dataset.noticeKind = kind;
   speech.dataset.sessionId = options.sessionId || "";
-  speech.title = "点击查看会话";
+  speech.title = kind === "reminder" || kind === "focus" ? "点击关闭" : "点击查看会话";
   void speech.offsetWidth;
   speech.classList.add("visible");
   scheduleHitMask();
@@ -377,9 +411,178 @@ function hideNotice() {
   if (!speech.classList.contains("notice")) return;
   clearTimeout(noticeTimer);
   noticeTimer = undefined;
-  speech.classList.remove("visible", "notice", "notice-approval", "notice-done", "notice-error");
+  speech.classList.remove(
+    "visible",
+    "notice",
+    "notice-approval",
+    "notice-done",
+    "notice-error",
+    "notice-reminder",
+    "notice-focus"
+  );
   speech.removeAttribute("title");
+  delete speech.dataset.noticeKind;
   scheduleHitMask();
+}
+
+function formatReminderTime(stamp) {
+  const date = new Date(Number(stamp) || 0);
+  if (Number.isNaN(date.getTime())) return "";
+  const now = new Date();
+  const clock = `${String(date.getHours()).padStart(2, "0")}:${String(date.getMinutes()).padStart(2, "0")}`;
+  if (date.toDateString() === now.toDateString()) return clock;
+  return `${date.getMonth() + 1}月${date.getDate()}日 ${clock}`;
+}
+
+function loadCareState() {
+  try {
+    careState = careApi.normalize(JSON.parse(localStorage.getItem(CARE_STORAGE_KEY) ?? "null"));
+  } catch {
+    careState = careApi.fresh();
+  }
+  return careState;
+}
+
+function saveCareState() {
+  if (!careState) return;
+  try {
+    localStorage.setItem(CARE_STORAGE_KEY, JSON.stringify(careState));
+  } catch {
+    // Storage can be unavailable in a locked-down webview; the cycle then just
+    // restarts with the next launch.
+  }
+}
+
+function careOptions() {
+  return {
+    waterEveryMin: currentSettings.waterEveryMin,
+    moveEveryMin: currentSettings.moveEveryMin
+  };
+}
+
+/// Gentle water / stretch nudges. Skipped while the user is chatting, dragging,
+/// focusing or during quiet hours (handled by the shared module).
+function checkCare(now = Date.now()) {
+  if (!careState || currentSettings.careReminders === false) return;
+  if (focusEndsAt || drag || !chatPanel.hidden) return;
+  if (document.hidden || speech.classList.contains("notice")) return;
+  const type = careApi.dueType(careState, now, careOptions());
+  if (!type) return;
+  careApi.markSent(careState, type, now, careOptions());
+  saveCareState();
+  if (type === "move") {
+    runBehavior("stretch", { say: false });
+  } else {
+    particles("💧", 4);
+  }
+  say(careApi.line(type), type === "move" ? "起来动一动" : "喝口水", 7000);
+}
+
+async function showReminders() {
+  try {
+    const items = await window.deepFish.listReminders();
+    if (!items?.length) {
+      say("现在没有待办提醒。对我说“提醒我……”就行。", "日程提醒", 5200);
+      return;
+    }
+    const lines = items
+      .slice(0, 3)
+      .map((item) => `${formatReminderTime(item.dueAt)} ${item.text}`)
+      .join("；");
+    const more = items.length > 3 ? `；还有 ${items.length - 3} 条` : "";
+    notify("reminder", `接下来：${lines}${more}`, { duration: 12000 });
+  } catch {
+    say("提醒列表暂时读不出来，稍后再试。", "日程提醒", 4200);
+  }
+}
+
+function handleReminderDue(items) {
+  if (!Array.isArray(items) || !items.length) return;
+  // Several reminders can come due in the same poll; show a few instead of
+  // silently dropping the rest (they are already removed from the store).
+  const shown = items.slice(0, 3).map((item) => item.text).join("；");
+  const extra = items.length > 3 ? `；还有 ${items.length - 3} 条` : "";
+  const text = `${shown}${extra}`;
+  // The chat panel sits on top of the notice bubble, so use a note there.
+  if (!chatPanel.hidden) {
+    appendNote(`⏰ 提醒：${text}`);
+    return;
+  }
+  notify("reminder", text, { duration: 15000 });
+  runBehavior("stretch", { say: false, particles: false });
+}
+
+async function playDefaultMusic() {
+  try {
+    const message = await window.deepFish.playMusic(
+      "lofi",
+      "netease",
+      currentSettings.musicPlayer || "auto"
+    );
+    say(message, "背景音乐", 6500);
+  } catch (error) {
+    say(`没能播放音乐：${error.message}`, "背景音乐", 5200);
+  }
+}
+
+function focusTotalMinutes(minutes) {
+  const requested = Number(minutes) || Number(currentSettings.focusMinutes) || 25;
+  return Math.min(120, Math.max(5, Math.round(requested)));
+}
+
+function updateFocusBadge() {
+  if (!focusEndsAt) return;
+  const remaining = Math.max(0, focusEndsAt - Date.now());
+  const minutes = Math.floor(remaining / 60000);
+  const seconds = Math.floor((remaining % 60000) / 1000);
+  focusTime.textContent = `${minutes}:${String(seconds).padStart(2, "0")}`;
+  if (remaining <= 0) stopFocus(true);
+}
+
+function startFocus(minutes) {
+  const total = focusTotalMinutes(minutes);
+  stopWalk();
+  focusEndsAt = Date.now() + total * 60000;
+  focusBadge.hidden = false;
+  updateFocusBadge();
+  clearInterval(focusTimer);
+  focusTimer = setInterval(updateFocusBadge, 1000);
+  scheduleHitMask();
+  runBehavior("sit", { say: false, particles: false });
+  say(`开始专注 ${total} 分钟，我在这儿陪你。`, "专注计时", 6000);
+}
+
+function stopFocus(completed, options = {}) {
+  if (!focusEndsAt) return;
+  clearInterval(focusTimer);
+  focusTimer = 0;
+  focusEndsAt = 0;
+  focusBadge.hidden = true;
+  scheduleHitMask();
+  // A session boundary always starts a fresh care cycle.
+  careState = careApi.fresh();
+  saveCareState();
+  if (options.silent) return;
+  if (completed) {
+    const message = "专注结束，起来伸展一下、喝口水吧。";
+    if (chatPanel.hidden) {
+      notify("focus", message, { duration: 12000 });
+    } else {
+      appendNote(`🍅 ${message}`);
+    }
+    runBehavior("stretch", { say: false, particles: false });
+  } else {
+    say("好，提前收工，休息一下。", "专注计时", 4000);
+  }
+  scheduleIdle();
+}
+
+function toggleFocus(minutes) {
+  if (focusEndsAt) {
+    stopFocus(false);
+    return;
+  }
+  startFocus(minutes);
 }
 
 function setScene(scene) {
@@ -517,7 +720,7 @@ function scheduleIdle() {
   const intensity = Math.min(1.8, Math.max(.5, Number(currentSettings.behaviorIntensity) || 1));
   const delay = (15 + Math.random() * 25) * 1000 / Math.max(phase.energy * intensity, .3);
   idleTimer = setTimeout(() => {
-    if (chatPanel.hidden && !drag) runBehavior(nextIdleBehavior());
+    if (!focusEndsAt && chatPanel.hidden && !drag) runBehavior(nextIdleBehavior());
     scheduleIdle();
   }, delay);
 }
@@ -525,7 +728,9 @@ function scheduleIdle() {
 function resumeWalkAfterInteraction(id) {
   const behavior = behaviorApi.getBehavior(id);
   setTimeout(() => {
-    if (currentSettings.freeWalk !== false && chatPanel.hidden && !drag) startWalk(4200, false);
+    if (!focusEndsAt && currentSettings.freeWalk !== false && chatPanel.hidden && !drag) {
+      startWalk(4200, false);
+    }
   }, behavior.duration + 280);
 }
 
@@ -620,8 +825,20 @@ function scrollChat() {
   });
 }
 
+/// Renders model replies as markdown; user text stays literal so what the user
+/// typed is preserved exactly.
+function renderMarkdown(node, text) {
+  if (!markdownApi) {
+    node.textContent = text;
+    return;
+  }
+  node.innerHTML = markdownApi.render(text);
+}
+
 function messageNode(message) {
-  const node = document.createElement("p");
+  // A block container: markdown replies contain headings, lists and code blocks,
+  // which are not valid inside a paragraph.
+  const node = document.createElement("div");
   if (message.role === "tool") {
     node.className = "tool-chip";
     node.textContent = message.display || message.name || "工具";
@@ -629,8 +846,34 @@ function messageNode(message) {
   }
   if (!message.content) return null;
   node.className = `message ${message.role}`;
-  node.textContent = message.content;
+  if (message.role === "assistant") {
+    node.classList.add("markdown");
+    renderMarkdown(node, message.content);
+  } else {
+    node.textContent = message.content;
+  }
   return node;
+}
+
+function resetPendingAssistant() {
+  if (pendingRender) {
+    cancelAnimationFrame(pendingRender);
+    pendingRender = 0;
+  }
+  pendingAssistant = null;
+  pendingAssistantText = "";
+}
+
+/// Reparsing every token would thrash layout, so streaming text is re-rendered
+/// at most once per frame.
+function scheduleAssistantRender() {
+  if (pendingRender || !pendingAssistant) return;
+  pendingRender = requestAnimationFrame(() => {
+    pendingRender = 0;
+    if (!pendingAssistant) return;
+    renderMarkdown(pendingAssistant, pendingAssistantText);
+    scrollChat();
+  });
 }
 
 function appendNode(node) {
@@ -761,8 +1004,8 @@ function showApproval(event) {
 function renderSession(session) {
   if (!session) return;
   activeSession = session;
-  pendingAssistant = null;
   chatLog.textContent = "";
+  resetPendingAssistant();
   sessionTitle.textContent = session.title;
   document.title = `大肥鱼 · ${session.title}`;
   if (session.summary) {
@@ -964,8 +1207,8 @@ function handleAgentEvent(event) {
       const message = event.message;
       if (message.role === "assistant" && pendingAssistant) {
         pendingAssistant.classList.remove("streaming");
-        if (message.content) pendingAssistant.textContent = message.content;
-        pendingAssistant = null;
+        if (message.content) renderMarkdown(pendingAssistant, message.content);
+        resetPendingAssistant();
         scrollChat();
       } else {
         const node = messageNode(message);
@@ -979,12 +1222,13 @@ function handleAgentEvent(event) {
       if (!pendingAssistant) {
         // `messageNode` drops empty messages, so the streaming placeholder is
         // built here instead of going through it.
-        pendingAssistant = document.createElement("p");
-        pendingAssistant.className = "message assistant streaming";
+        pendingAssistant = document.createElement("div");
+        pendingAssistant.className = "message assistant markdown streaming";
+        pendingAssistantText = "";
         appendNode(pendingAssistant);
       }
-      pendingAssistant.textContent += event.text ?? "";
-      scrollChat();
+      pendingAssistantText += event.text ?? "";
+      scheduleAssistantRender();
       break;
     }
     case "status":
@@ -992,7 +1236,7 @@ function handleAgentEvent(event) {
         setRunning(false);
         if (pendingAssistant) {
           pendingAssistant.classList.remove("streaming");
-          pendingAssistant = null;
+          resetPendingAssistant();
         }
       } else {
         setRunning(true);
@@ -1036,7 +1280,7 @@ async function sendChat(event) {
   autoGrowInput();
   hideSessionList();
   runBehavior("think", { say: false });
-  pendingAssistant = null;
+  resetPendingAssistant();
   setRunning(true);
   requestSequence += 1;
   try {
@@ -1055,7 +1299,7 @@ stage.addEventListener("pointerenter", () => {
 stage.addEventListener("pointerleave", () => { lastZone = ""; });
 
 stage.addEventListener("pointerdown", (event) => {
-  if (event.button !== 0 || event.target === chatFab) return;
+  if (event.button !== 0 || event.target === chatFab || event.target === focusBadge) return;
   // Without this the webview starts its own text/image drag when the window
   // stops moving under the cursor (screen edge, screen switch), which leaves a
   // blue selection box around the character and kills the drag gesture.
@@ -1093,7 +1337,7 @@ stage.addEventListener("pointermove", (event) => {
 });
 
 stage.addEventListener("pointerup", (event) => {
-  if (event.button !== 0 || event.target === chatFab) return;
+  if (event.button !== 0 || event.target === chatFab || event.target === focusBadge) return;
   if (!drag) return;
   const completedDrag = drag;
   const moved = completedDrag?.total || 0;
@@ -1113,8 +1357,12 @@ stage.addEventListener("pointerup", (event) => {
 
 speech.addEventListener("click", async () => {
   if (!speech.classList.contains("notice")) return;
+  const kind = speech.dataset.noticeKind || "";
   const sessionId = speech.dataset.sessionId;
   hideNotice();
+  // Reminders and focus summaries are not conversations; a click just dismisses
+  // them instead of opening the chat panel.
+  if (kind === "reminder" || kind === "focus") return;
   await openChat();
   if (sessionId && (!activeSession || activeSession.id !== sessionId)) {
     await loadSession(sessionId);
@@ -1124,6 +1372,11 @@ speech.addEventListener("click", async () => {
 chatFab.addEventListener("click", (event) => {
   event.stopPropagation();
   openChat();
+});
+
+focusBadge.addEventListener("click", (event) => {
+  event.stopPropagation();
+  stopFocus(false);
 });
 
 for (const name of ["pointerenter", "pointerleave"]) {
@@ -1161,6 +1414,19 @@ document.addEventListener("contextmenu", (event) => {
 chatClose.addEventListener("click", closeChat);
 chatForm.addEventListener("submit", sendChat);
 
+// Reply links open in the system browser; letting the webview navigate would
+// replace the pet window with the page.
+function openMessageLink(event) {
+  const anchor = event.target?.closest?.("a[data-external]");
+  if (!anchor) return;
+  event.preventDefault();
+  const opened = window.deepFish.openExternal?.(anchor.getAttribute("href") || "");
+  opened?.catch(() => {});
+}
+
+chatLog.addEventListener("click", openMessageLink);
+chatLog.addEventListener("auxclick", openMessageLink);
+
 /// Grows the composer with the text, up to the `max-height` in the stylesheet.
 function autoGrowInput() {
   chatInput.style.height = "auto";
@@ -1192,13 +1458,25 @@ chatForm.addEventListener("pointerdown", hideSessionList);
 void refreshSessions();
 
 window.deepFish.onWake(({ action, awayMs }) => {
+  // A long sleep should not dump every overdue care reminder at once.
+  careState = careApi.fresh();
+  saveCareState();
   runBehavior(action);
   if (action === "startle" && awayMs > 3600000) say("诶？！你终于回来了！", "惊醒", 5000);
 });
 
 window.deepFish.onCommand((command) => {
   if (command === "open-chat") openChat();
+  else if (command === "focus") toggleFocus();
+  else if (command === "music") playDefaultMusic();
+  else if (command === "reminders") void showReminders();
   else runBehavior(command);
+});
+
+window.deepFish.onReminder(handleReminderDue);
+window.deepFish.onFocus(({ action, minutes }) => {
+  if (action === "stop") stopFocus(false);
+  else startFocus(minutes);
 });
 
 // The model can ask the pet to speak through the `pet_say` tool.
@@ -1221,8 +1499,10 @@ function applySettings(settings) {
 
 window.deepFish.onSettings(applySettings);
 window.deepFish.getSettings().then(applySettings);
+loadCareState();
 applyClock();
 setInterval(applyClock, 60000);
+setInterval(() => checkCare(), 30000);
 scheduleIdle();
 window.addEventListener("resize", scheduleHitMask);
 // Read-only snapshot consumed by the packaged smoke test.

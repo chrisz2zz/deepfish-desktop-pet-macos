@@ -59,8 +59,39 @@ impl Plan {
 pub fn tool_root() -> PathBuf {
     std::env::var_os("DEEPFISH_TOOL_ROOT")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(PathBuf::from))
+        .or_else(home_directory)
         .unwrap_or_else(|| PathBuf::from("/"))
+}
+
+/// Windows does not set `HOME`; `USERPROFILE` is the equivalent. Both are
+/// consulted on Windows because Git Bash and MSYS exports do set `HOME`.
+fn home_directory() -> Option<PathBuf> {
+    #[cfg(target_os = "windows")]
+    let value = std::env::var_os("USERPROFILE").or_else(|| std::env::var_os("HOME"));
+    #[cfg(not(target_os = "windows"))]
+    let value = std::env::var_os("HOME");
+    value.map(PathBuf::from)
+}
+
+/// Windows paths are case-insensitive, so the lexical containment check has to
+/// accept a root spelled with different capitalisation.
+fn is_inside(root: &Path, path: &Path) -> bool {
+    if path.starts_with(root) {
+        return true;
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let root = root.to_string_lossy().to_lowercase();
+        let path = path.to_string_lossy().to_lowercase();
+        let root = root.trim_end_matches(['\\', '/']);
+        path == root
+            || path.starts_with(&format!("{root}\\"))
+            || path.starts_with(&format!("{root}/"))
+    }
+    #[cfg(not(target_os = "windows"))]
+    {
+        false
+    }
 }
 
 /// Expands `~`, resolves `..` lexically and rejects anything outside the root.
@@ -75,7 +106,8 @@ pub fn resolve(root: &Path, raw: &str) -> Result<PathBuf, String> {
     }
     let expanded = match raw.strip_prefix('~') {
         Some("") => root.to_path_buf(),
-        Some(rest) => root.join(rest.trim_start_matches('/')),
+        // `~\notes` is the cmd spelling of `~/notes`.
+        Some(rest) => root.join(rest.trim_start_matches(['/', '\\'])),
         None => PathBuf::from(raw),
     };
     let absolute = if expanded.is_absolute() {
@@ -93,7 +125,7 @@ pub fn resolve(root: &Path, raw: &str) -> Result<PathBuf, String> {
             other => normalized.push(other.as_os_str()),
         }
     }
-    if !normalized.starts_with(root) {
+    if !is_inside(root, &normalized) {
         return Err(format!("路径超出允许范围（仅限 {}）", root.display()));
     }
     Ok(normalized)
@@ -119,16 +151,51 @@ pub const SENSITIVE: &[&str] = &[
     "library/application support/com.deepfish.desktop-pet",
     "library/cookies",
     "library/safari",
+    // Windows credential stores, plus this app's own settings file, which
+    // holds the API key (`app_config_dir()` maps to `%APPDATA%` there).
+    "appdata/roaming/microsoft/credentials",
+    "appdata/roaming/microsoft/protect",
+    "appdata/local/microsoft/credentials",
+    "appdata/roaming/com.deepfish.desktop-pet",
 ];
 
 pub fn is_sensitive(root: &Path, path: &Path) -> bool {
-    let Ok(relative) = path.strip_prefix(root) else {
+    let Some(relative) = relative_for_match(root, path) else {
         return true;
     };
-    let text = relative.to_string_lossy().to_lowercase();
+    // Windows separates with `\`; normalising keeps one needle list working
+    // for both platforms.
+    let text = relative
+        .to_string_lossy()
+        .to_lowercase()
+        .replace('\\', "/");
     SENSITIVE.iter().any(|needle| {
         text == *needle || text.starts_with(&format!("{needle}/")) || text.ends_with(&format!("/{needle}"))
     })
+}
+
+/// The part of `path` below `root`, accepting a differently-cased root on
+/// Windows. Falls back to the lowercased spelling there, which is fine because
+/// callers only use it for case-insensitive comparisons.
+fn relative_for_match(root: &Path, path: &Path) -> Option<PathBuf> {
+    if let Ok(relative) = path.strip_prefix(root) {
+        return Some(relative.to_path_buf());
+    }
+    #[cfg(target_os = "windows")]
+    {
+        let root = root.to_string_lossy().to_lowercase();
+        let root = root.trim_end_matches(['\\', '/']).to_string();
+        let path = path.to_string_lossy().to_lowercase();
+        if path == root {
+            return Some(PathBuf::new());
+        }
+        for separator in ['\\', '/'] {
+            if let Some(rest) = path.strip_prefix(&format!("{root}{separator}")) {
+                return Some(PathBuf::from(rest));
+            }
+        }
+    }
+    None
 }
 
 /// Commands that must never run, no matter what the user approves.
@@ -139,6 +206,11 @@ const BLOCKED_HEADS: &[&str] = &[
     "csrutil", "nvram", "kextload", "kextunload", "tccutil", "security", "launchctl", "spctl",
     "fdisk", "newfs", "chflags", "dscl", "pfctl", "systemsetup", "sparsebundle", "osascript",
     "curl", "wget", "nc", "ncat", "telnet", "ssh", "scp", "sftp", "rsync", "ftp",
+    // Windows tools with the same reach: disks, boot configuration, services,
+    // credential stores and things that hand an arbitrary script back to the OS.
+    "powershell", "pwsh", "reg", "regedit", "sc", "schtasks", "bcdedit", "diskpart",
+    "format", "vssadmin", "wbadmin", "takeown", "icacls", "net", "netsh", "wmic", "mshta",
+    "rundll32", "regsvr32", "certutil", "taskkill",
 ];
 
 /// Read-only utilities that are safe on their own.
@@ -147,6 +219,8 @@ const SAFE_HEADS: &[&str] = &[
     "whoami", "date", "uname", "sw_vers", "echo", "printf", "basename", "dirname", "realpath",
     "sort", "uniq", "cut", "tr", "jq", "grep", "rg", "find", "diff", "cal", "hostname", "id",
     "printenv",
+    // Windows cmd built-ins with the same read-only meaning.
+    "dir", "type", "where", "findstr", "more", "ver",
 ];
 
 const SAFE_GIT_SUBCOMMANDS: &[&str] = &[
@@ -155,7 +229,7 @@ const SAFE_GIT_SUBCOMMANDS: &[&str] = &[
 ];
 
 /// Shell syntax that can hide a second command or write a file.
-const SHELL_WRITES: &[&str] = &[">", ">>", "<", "$(", "`", "&&", "||", ";"];
+const SHELL_WRITES: &[&str] = &[">", ">>", "<", "$(", "`", "&&", "||", ";", "&", "\n", "\r"];
 
 fn shell_words(command: &str) -> Vec<String> {
     command
@@ -165,10 +239,25 @@ fn shell_words(command: &str) -> Vec<String> {
         .collect()
 }
 
+/// The program name as the shell would resolve it: no directory part, no
+/// Windows executable suffix, case-folded so `DIR` and `dir` classify alike.
+fn executable_name(word: &str) -> String {
+    let name = word
+        .trim_matches('"')
+        .rsplit(['/', '\\'])
+        .next()
+        .unwrap_or(word);
+    let name = [".exe", ".com", ".bat", ".cmd"]
+        .iter()
+        .find_map(|suffix| name.strip_suffix(suffix))
+        .unwrap_or(name);
+    name.to_lowercase()
+}
+
 fn head_of(segment: &str) -> String {
     shell_words(segment)
         .first()
-        .map(|word| word.rsplit('/').next().unwrap_or(word).to_string())
+        .map(|word| executable_name(word))
         .unwrap_or_default()
 }
 
@@ -193,7 +282,7 @@ fn segment_is_safe(root: &Path, segment: &str) -> bool {
     let Some(first) = words.first() else {
         return true;
     };
-    let head = first.rsplit('/').next().unwrap_or(first).to_string();
+    let head = executable_name(first);
     if !SAFE_HEADS.contains(&head.as_str()) && head != "git" && head != "node" {
         return false;
     }
@@ -214,7 +303,10 @@ fn segment_is_safe(root: &Path, segment: &str) -> bool {
     }
     // Reading a credential file through `cat` is still a leak.
     words[1..].iter().all(|word| {
-        let looks_like_path = word.contains('/') || word.starts_with('.') || word.starts_with('~');
+        let looks_like_path = word.contains('/')
+            || word.contains('\\')
+            || word.starts_with('.')
+            || word.starts_with('~');
         if !looks_like_path {
             return true;
         }
@@ -349,6 +441,21 @@ pub fn plan(root: &Path, call: &ToolCall, sandboxed: bool) -> Plan {
             "抓取网页：{}",
             super::session::truncate(&argument(&args, "url"), 80)
         )),
+        "add_reminder" => Plan::safe(format!(
+            "设置提醒：{}",
+            super::session::truncate(&argument(&args, "text"), 40)
+        )),
+        "list_reminders" => Plan::safe("查看提醒".to_string()),
+        "cancel_reminder" => Plan::safe("取消一条提醒".to_string()),
+        "play_music" => Plan::safe(format!(
+            "播放音乐：{}",
+            super::session::truncate(&argument(&args, "query"), 40)
+        )),
+        "focus_session" => Plan::safe(if argument(&args, "action") == "stop" {
+            "结束专注计时".to_string()
+        } else {
+            "开始专注计时".to_string()
+        }),
         // Everything the pet can do to itself is harmless.
         _ => Plan::safe(call.name.clone()),
     }
@@ -362,11 +469,15 @@ fn default_dot(value: &str) -> String {
     }
 }
 
-/// Shortens the home prefix so approval cards stay readable.
+/// Shortens the home prefix so approval cards stay readable. Windows
+/// separators are folded into `/` so the text looks the same everywhere.
 pub fn display_path(root: &Path, path: &Path) -> String {
     match path.strip_prefix(root) {
         Ok(relative) if relative.as_os_str().is_empty() => "~".to_string(),
-        Ok(relative) => format!("~/{}", relative.display()),
+        Ok(relative) => format!(
+            "~/{}",
+            relative.display().to_string().replace('\\', "/")
+        ),
         Err(_) => path.display().to_string(),
     }
 }
@@ -388,6 +499,8 @@ mod tests {
         let root = home();
         assert_eq!(resolve(&root, ".").unwrap(), root);
         assert_eq!(resolve(&root, "~/notes").unwrap(), root.join("notes"));
+        // cmd-style separator after the home shortcut.
+        assert_eq!(resolve(&root, r"~\notes").unwrap(), root.join("notes"));
         assert_eq!(
             resolve(&root, "/Users/tester/a/../b").unwrap(),
             root.join("b")
@@ -413,6 +526,37 @@ mod tests {
         assert!(!is_sensitive(&root, &root.join("Documents/todo.md")));
         // Anything outside the root is treated as sensitive.
         assert!(is_sensitive(&root, Path::new("/etc/passwd")));
+    }
+
+    #[test]
+    fn flags_windows_credential_files() {
+        let root = PathBuf::from(r"C:\Users\tester");
+        assert!(is_sensitive(
+            &root,
+            &root.join(r"AppData\Roaming\Microsoft\Credentials")
+        ));
+        assert!(is_sensitive(
+            &root,
+            &root.join(r"AppData\Roaming\com.deepfish.desktop-pet\settings.json")
+        ));
+        assert!(!is_sensitive(&root, &root.join(r"Documents\todo.md")));
+    }
+
+    #[test]
+    fn classifies_windows_shell_commands() {
+        let root = home();
+        assert_eq!(command_risk(&root, "dir"), Risk::Safe);
+        assert_eq!(command_risk(&root, "type notes.txt"), Risk::Safe);
+        assert_eq!(command_risk(&root, "del notes.txt"), Risk::NeedsApproval);
+        assert_eq!(command_risk(&root, "dir & del notes.txt"), Risk::NeedsApproval);
+        assert_eq!(command_risk(&root, "powershell -Command dir"), Risk::Blocked);
+        // Executable suffixes and directories cannot smuggle a blocked tool past
+        // the classifier.
+        assert_eq!(
+            command_risk(&root, r"C:\Windows\System32\format.com D:"),
+            Risk::Blocked
+        );
+        assert_eq!(command_risk(&root, "type ~/.ssh/id_ed25519"), Risk::NeedsApproval);
     }
 
     #[test]

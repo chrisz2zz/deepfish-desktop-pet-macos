@@ -21,6 +21,27 @@ const PET_CHECK: &str = r##"(async () => {
   window.__TAURI__.core.invoke("smoke_report", { stage: "pet", data: {
     bridge: typeof window.deepFish?.walkStep === "function",
     agent: typeof window.deepFish?.agent?.send === "function",
+    markdown: typeof window.DeepFishMarkdown?.render === "function",
+    care: typeof window.DeepFishCare?.dueType === "function",
+    focus: typeof window.deepFish?.onFocus === "function",
+    reminders:
+      await window.deepFish
+        ?.listReminders?.()
+        .then((items) => Array.isArray(items), () => false),
+    reminderRoundTrip: await (async () => {
+      const created = await window.__TAURI__.core.invoke("add_reminder", { text: "冒烟测试", minutes: 5 });
+      const listed = await window.__TAURI__.core.invoke("list_reminders");
+      const removed = await window.__TAURI__.core.invoke("remove_reminder", { id: created?.id });
+      return Boolean(created?.id) && listed.some((item) => item.id === created.id) && removed === true;
+    })().catch(() => false),
+    openExternal: typeof window.deepFish?.openExternal === "function",
+    openExternalRejects: await window.__TAURI__.core
+      .invoke("open_external", { url: "file:///etc/passwd" })
+      .then(() => false, () => true),
+    playMusic: typeof window.deepFish?.playMusic === "function",
+    playMusicRejects: await window.__TAURI__.core
+      .invoke("play_music", { query: "", site: "netease", player: "bogus" })
+      .then(() => false, () => true),
     sessions: (await window.deepFish?.agent?.listSessions?.().catch(() => []))?.length ?? 0,
     bubble: Boolean(document.querySelector("#chat-panel")?.classList.contains("chat-panel")),
     hitMask: window.deepFishHitMask?.() ?? null,

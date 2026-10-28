@@ -2,6 +2,7 @@ use std::fmt::Write as _;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use serde_json::{json, Value};
@@ -9,6 +10,7 @@ use tauri::{AppHandle, Emitter, Manager};
 
 use super::risk;
 use super::session::ToolCall;
+use crate::reminders::{format_due, resolve_due, ReminderStore};
 
 /// Hard caps so one tool call cannot flood the model's context or block the UI.
 const MAX_READ_LINES: usize = 400;
@@ -54,15 +56,19 @@ pub struct ToolContext {
     pub fetch: bool,
     /// Wrap `run_command` in the Seatbelt sandbox (on by default).
     pub sandbox: bool,
+    /// `auto`, `netease`, `qq` or `browser` for `play_music`.
+    pub music_player: String,
 }
 
 impl ToolContext {
+    #[allow(clippy::too_many_arguments)]
     pub fn new(
         root: PathBuf,
         api_key: Option<String>,
         search: bool,
         fetch: bool,
         sandbox: bool,
+        music_player: String,
     ) -> Self {
         Self {
             root,
@@ -70,6 +76,7 @@ impl ToolContext {
             search,
             fetch,
             sandbox,
+            music_player,
         }
     }
 }
@@ -124,6 +131,11 @@ pub fn label(name: &str) -> String {
         "pet_say" => "💬 说句话".to_string(),
         "open_settings" => "⚙ 打开设置".to_string(),
         "rename_session" => "✏ 重命名会话".to_string(),
+        "add_reminder" => "⏰ 设置提醒".to_string(),
+        "list_reminders" => "📋 查看提醒".to_string(),
+        "cancel_reminder" => "🗑 取消提醒".to_string(),
+        "play_music" => "🎵 播放音乐".to_string(),
+        "focus_session" => "🍅 专注计时".to_string(),
         "list_dir" => "📁 列目录".to_string(),
         "read_file" => "📄 读文件".to_string(),
         "write_file" => "💾 写文件".to_string(),
@@ -198,6 +210,80 @@ pub fn specs(context: &ToolContext) -> Value {
         {
             "type": "function",
             "function": {
+                "name": "add_reminder",
+                "description": "为用户设置一个到点提醒（喝水、开会、休息等）。用户说“提醒我……”时使用。时间用相对分钟数，或本地时间如“2026-10-28 20:30”/“20:30”。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "text": { "type": "string", "description": "提醒内容，尽量简短" },
+                        "minutes": { "type": "integer", "description": "多少分钟后提醒（1-43200）" },
+                        "at": { "type": "string", "description": "本地提醒时间；与 minutes 二选一" }
+                    },
+                    "required": ["text"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "list_reminders",
+                "description": "列出还没触发的提醒，按时间排序。回答“我有哪些提醒”时使用。",
+                "parameters": { "type": "object", "properties": {} }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "cancel_reminder",
+                "description": "取消一个提醒。需要先用 list_reminders 拿到 id。",
+                "parameters": {
+                    "type": "object",
+                    "properties": { "id": { "type": "string", "description": "提醒 id" } },
+                    "required": ["id"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "play_music",
+                "description": "用系统默认浏览器打开音乐搜索页播放音乐，适合用户说“放首歌”“来点背景音乐”时使用。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "歌名、歌手或氛围，如“lofi”“周杰伦”" },
+                        "site": {
+                            "type": "string",
+                            "enum": ["netease", "bilibili", "youtube", "spotify"],
+                            "description": "浏览器回退时的音乐站点，默认 netease"
+                        },
+                        "player": {
+                            "type": "string",
+                            "enum": ["auto", "netease", "qq", "browser"],
+                            "description": "播放方式：auto 优先本机客户端，默认 auto"
+                        }
+                    }
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
+                "name": "focus_session",
+                "description": "开始或结束一次专注计时（番茄钟）。专注期间桌宠会安静陪伴，结束时提醒休息。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "action": { "type": "string", "enum": ["start", "stop"] },
+                        "minutes": { "type": "integer", "description": "专注分钟数 5-120；不填则用设置里的值" }
+                    },
+                    "required": ["action"]
+                }
+            }
+        },
+        {
+            "type": "function",
+            "function": {
                 "name": "list_dir",
                 "description": "列出用户主目录内的某个目录，返回名称、类型和大小。路径必须是 ~ 或 ~/ 开头的相对写法。",
                 "parameters": {
@@ -243,7 +329,7 @@ pub fn specs(context: &ToolContext) -> Value {
             "type": "function",
             "function": {
                 "name": "run_command",
-                "description": "在用户主目录内执行一条 shell 命令并返回输出。只读命令会自动执行，其它命令需要用户审批；涉及 sudo、凭据或外网访问的命令一律禁止。命令默认在系统沙箱内运行：只能写当前工作目录、临时目录和构建缓存，只读命令没有网络；越界访问会得到 Operation not permitted。",
+                "description": run_command_description(),
                 "parameters": {
                     "type": "object",
                     "properties": {
@@ -292,6 +378,18 @@ pub fn specs(context: &ToolContext) -> Value {
         }));
     }
     tools
+}
+
+/// The tool description has to be honest about the shell and the sandbox,
+/// both of which differ per platform.
+fn run_command_description() -> &'static str {
+    if cfg!(target_os = "windows") {
+        "在用户主目录内用 cmd /C 执行一条命令并返回输出。只读命令会自动执行，其它命令需要用户审批；涉及 sudo、凭据或外网访问的命令一律禁止。Windows 没有 Seatbelt 沙箱，命令会直接以当前用户权限运行，请只执行可以信任的命令。"
+    } else if cfg!(target_os = "macos") {
+        "在用户主目录内执行一条 shell 命令并返回输出。只读命令会自动执行，其它命令需要用户审批；涉及 sudo、凭据或外网访问的命令一律禁止。命令默认在系统沙箱内运行：只能写当前工作目录、临时目录和构建缓存，只读命令没有网络；越界访问会得到 Operation not permitted。"
+    } else {
+        "在用户主目录内执行一条 shell 命令并返回输出。只读命令会自动执行，其它命令需要用户审批；涉及 sudo、凭据或外网访问的命令一律禁止。当前平台没有 Seatbelt 沙箱，需审批的命令会以你的权限运行。"
+    }
 }
 
 fn argument(args: &Value, key: &str) -> Option<String> {
@@ -501,6 +599,32 @@ fn drain(mut reader: impl std::io::Read) -> String {
     String::from_utf8_lossy(&kept).to_string()
 }
 
+/// Runs the command with the platform shell. Windows has no POSIX `sh`, so
+/// `cmd.exe` takes over; the console code page is switched to UTF-8 first so
+/// non-ASCII output survives the decode step below.
+#[cfg(target_os = "windows")]
+fn shell_launch(command: &str) -> super::sandbox::Launch {
+    super::sandbox::Launch {
+        program: std::env::var_os("COMSPEC").map_or_else(
+            || PathBuf::from("cmd.exe"),
+            PathBuf::from,
+        ),
+        args: Vec::new(),
+        // `cmd` cannot parse Rust's standard argument quoting, so the whole
+        // switch line is passed through verbatim.
+        raw: Some(format!("/D /S /C \"chcp 65001>nul & {command}\"")),
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+fn shell_launch(command: &str) -> super::sandbox::Launch {
+    super::sandbox::Launch {
+        program: PathBuf::from("sh"),
+        args: vec!["-c".to_string(), command.to_string()],
+        raw: None,
+    }
+}
+
 fn run_command(
     root: &Path,
     command: &str,
@@ -531,20 +655,26 @@ fn run_command(
             }
         }
     } else {
-        super::sandbox::Launch {
-            program: PathBuf::from("sh"),
-            args: vec!["-c".to_string(), command.to_string()],
-        }
+        shell_launch(command)
     };
 
-    let mut child = match Command::new(&launch.program)
+    let mut process = Command::new(&launch.program);
+    process
         .args(&launch.args)
         .current_dir(cwd)
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .spawn()
-    {
+        .stderr(Stdio::piped());
+    #[cfg(target_os = "windows")]
+    if let Some(raw) = launch.raw.as_deref() {
+        use std::os::windows::process::CommandExt as _;
+        process.raw_arg(raw);
+        // The pet has no console window; without this flag `cmd` would flash
+        // one for every tool call.
+        process.creation_flags(0x0800_0000); // CREATE_NO_WINDOW
+    }
+
+    let mut child = match process.spawn() {
         Ok(child) => child,
         Err(error) => return failure(name, format!("无法启动命令：{error}")),
     };
@@ -690,6 +820,129 @@ pub fn execute(app: &AppHandle, ctx: &ToolContext, call: &ToolCall) -> ToolOutco
                 effect: ToolEffect::None,
             },
         },
+        "add_reminder" => {
+            let Some(store) = app.try_state::<Arc<ReminderStore>>() else {
+                return failure("add_reminder", "提醒服务还没有准备好。");
+            };
+            let text = argument(&args, "text").unwrap_or_default();
+            let minutes = args
+                .get("minutes")
+                .and_then(Value::as_u64)
+                .map(|value| value.clamp(1, 43_200) as u32);
+            let at = argument(&args, "at");
+            let due = match resolve_due(minutes, at.as_deref()) {
+                Ok(due) => due,
+                Err(error) => return failure("add_reminder", error),
+            };
+            match store.add(&text, due) {
+                Ok(reminder) => ToolOutcome {
+                    content: format!(
+                        "已经记下：{}（{}）。到点我会提醒你。",
+                        reminder.text,
+                        format_due(reminder.due_at)
+                    ),
+                    display: format!("⏰ {}", super::session::truncate(&reminder.text, 16)),
+                    effect: ToolEffect::None,
+                },
+                Err(error) => failure("add_reminder", error),
+            }
+        }
+        "list_reminders" => {
+            let Some(store) = app.try_state::<Arc<ReminderStore>>() else {
+                return failure("list_reminders", "提醒服务还没有准备好。");
+            };
+            let items = store.list();
+            if items.is_empty() {
+                ToolOutcome {
+                    content: "现在没有待触发的提醒。".to_string(),
+                    display: label("list_reminders"),
+                    effect: ToolEffect::None,
+                }
+            } else {
+                let lines = items
+                    .iter()
+                    .take(20)
+                    .map(|item| format!("- {}（{}）[{}]", item.text, format_due(item.due_at), item.id))
+                    .collect::<Vec<_>>()
+                    .join("\n");
+                ToolOutcome {
+                    content: format!("还有 {} 条提醒：\n{lines}", items.len()),
+                    display: format!("📋 {} 条提醒", items.len()),
+                    effect: ToolEffect::None,
+                }
+            }
+        }
+        "cancel_reminder" => {
+            let Some(store) = app.try_state::<Arc<ReminderStore>>() else {
+                return failure("cancel_reminder", "提醒服务还没有准备好。");
+            };
+            let id = argument(&args, "id").unwrap_or_default();
+            if id.is_empty() {
+                return failure("cancel_reminder", "缺少提醒 id。");
+            }
+            if store.remove(&id) {
+                ToolOutcome {
+                    content: format!("提醒 {id} 已取消。"),
+                    display: label("cancel_reminder"),
+                    effect: ToolEffect::None,
+                }
+            } else {
+                failure("cancel_reminder", "没有找到这个提醒，可能已经触发或被取消了。")
+            }
+        }
+        "play_music" => {
+            let query = argument(&args, "query").unwrap_or_default();
+            let site = argument(&args, "site").unwrap_or_else(|| "netease".to_string());
+            let player = argument(&args, "player").unwrap_or_else(|| {
+                if ctx.music_player.is_empty() {
+                    "auto".to_string()
+                } else {
+                    ctx.music_player.clone()
+                }
+            });
+            match crate::music::play(&player, &site, &query) {
+                Ok(message) => ToolOutcome {
+                    content: message,
+                    display: if query.is_empty() {
+                        label("play_music")
+                    } else {
+                        format!("🎵 {}", super::session::truncate(&query, 20))
+                    },
+                    effect: ToolEffect::None,
+                },
+                Err(error) => failure("play_music", error),
+            }
+        }
+        "focus_session" => {
+            let action = argument(&args, "action").unwrap_or_else(|| "start".to_string());
+            if !matches!(action.as_str(), "start" | "stop") {
+                return failure("focus_session", "action 只能是 start 或 stop。");
+            }
+            let minutes = args
+                .get("minutes")
+                .and_then(Value::as_u64)
+                .unwrap_or(0)
+                .min(120) as u32;
+            if let Some(window) = app.get_webview_window(crate::PET_WINDOW_LABEL) {
+                let _ = window.emit(
+                    "focus-command",
+                    json!({ "action": action, "minutes": minutes }),
+                );
+            }
+            ToolOutcome {
+                content: if action == "start" {
+                    if minutes > 0 {
+                        format!("专注计时已开始：{minutes} 分钟。")
+                    } else {
+                        "专注计时已开始，时长按设置里的专注时长。".to_string()
+                    }
+                } else {
+                    "专注计时已结束，记得起来走走。".to_string()
+                },
+                display: label("focus_session"),
+                effect: ToolEffect::None,
+            }
+        }
         "list_dir" => {
             let raw = argument(&args, "path").unwrap_or_else(|| ".".to_string());
             match risk::resolve(root, &raw) {
@@ -760,7 +1013,14 @@ mod tests {
     use std::path::PathBuf;
 
     fn context(search: bool, fetch: bool) -> ToolContext {
-        ToolContext::new(PathBuf::from("/tmp"), Some("sk-test".to_string()), search, fetch, true)
+        ToolContext::new(
+            PathBuf::from("/tmp"),
+            Some("sk-test".to_string()),
+            search,
+            fetch,
+            true,
+            "auto".to_string(),
+        )
     }
 
     #[test]
@@ -780,6 +1040,11 @@ mod tests {
                 "pet_say",
                 "open_settings",
                 "rename_session",
+                "add_reminder",
+                "list_reminders",
+                "cancel_reminder",
+                "play_music",
+                "focus_session",
                 "list_dir",
                 "read_file",
                 "write_file",
@@ -820,7 +1085,14 @@ mod tests {
 
         // Enabled but without a key: the tool explains what is missing instead
         // of trying an unauthenticated request.
-        let keyless = ToolContext::new(PathBuf::from("/tmp"), None, true, true, true);
+        let keyless = ToolContext::new(
+            PathBuf::from("/tmp"),
+            None,
+            true,
+            true,
+            true,
+            "auto".to_string(),
+        );
         let search = run_web_search(&keyless, &json!({ "query": "deepseek" }));
         assert!(search.content.contains("API Key"), "{}", search.content);
     }
@@ -871,23 +1143,38 @@ mod tests {
         std::fs::remove_dir_all(&root).ok();
     }
 
+    #[cfg(target_os = "windows")]
+    const ECHO_COMMAND: &str = "echo hi there";
+    #[cfg(not(target_os = "windows"))]
+    const ECHO_COMMAND: &str = "printf 'hi there'";
+
+    #[cfg(target_os = "windows")]
+    const RAW_COMMAND: &str = "echo raw";
+    #[cfg(not(target_os = "windows"))]
+    const RAW_COMMAND: &str = "printf 'raw'";
+
+    #[cfg(target_os = "windows")]
+    const SLEEP_COMMAND: &str = "ping -n 10 127.0.0.1 >nul";
+    #[cfg(not(target_os = "windows"))]
+    const SLEEP_COMMAND: &str = "sleep 5";
+
     #[test]
     fn runs_commands_and_reports_output() {
         let root = scratch("cmd");
-        let ok = run_command(&root, "printf 'hi there'", &root, Duration::from_secs(5), true);
+        let ok = run_command(&root, ECHO_COMMAND, &root, Duration::from_secs(5), true);
         assert!(ok.content.contains("hi there"), "{}", ok.content);
         assert!(ok.content.contains("退出码 0"), "{}", ok.content);
         #[cfg(target_os = "macos")]
         assert!(ok.content.contains("沙箱内"), "{}", ok.content);
 
-        let plain = run_command(&root, "printf 'raw'", &root, Duration::from_secs(5), false);
+        let plain = run_command(&root, RAW_COMMAND, &root, Duration::from_secs(5), false);
         assert!(plain.content.contains("raw"), "{}", plain.content);
         assert!(!plain.content.contains("沙箱内"), "{}", plain.content);
 
         let failed = run_command(&root, "exit 3", &root, Duration::from_secs(5), true);
         assert!(failed.content.contains("退出码 3"), "{}", failed.content);
 
-        let timed_out = run_command(&root, "sleep 5", &root, Duration::from_millis(600), true);
+        let timed_out = run_command(&root, SLEEP_COMMAND, &root, Duration::from_millis(600), true);
         assert!(timed_out.content.contains("超时"), "{}", timed_out.content);
         std::fs::remove_dir_all(&root).ok();
     }
@@ -903,6 +1190,8 @@ mod tests {
     #[test]
     fn labels_unknown_tools() {
         assert_eq!(label("get_time"), "🕒 查看时间");
+        assert_eq!(label("add_reminder"), "⏰ 设置提醒");
         assert_eq!(label("mystery"), "🛠 mystery");
     }
+
 }

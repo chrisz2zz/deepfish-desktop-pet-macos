@@ -1,6 +1,8 @@
 mod agent;
 mod chat;
 mod hittest;
+mod music;
+mod reminders;
 mod settings;
 mod smoke;
 
@@ -19,6 +21,7 @@ use tauri::{
 
 use agent::AgentRuntime;
 use hittest::ClickThrough;
+use reminders::{Reminder, ReminderStore};
 use settings::{PublicSettings, SettingsPatch, SettingsStore};
 
 pub(crate) const PET_WINDOW_LABEL: &str = "pet";
@@ -28,6 +31,7 @@ const PET_WINDOW_HEIGHT: f64 = 560.0;
 const PET_WINDOW_MARGIN: f64 = 30.0;
 const SLEEP_POLL: Duration = Duration::from_secs(15);
 const SLEEP_THRESHOLD: Duration = Duration::from_secs(90);
+const REMINDER_POLL: Duration = Duration::from_secs(15);
 
 pub(crate) struct AppState {
     store: Mutex<SettingsStore>,
@@ -504,6 +508,9 @@ fn place_window(window: &WebviewWindow, x: i32, y: i32, _scale: f64) {
 fn remember_window_frame(window: &WebviewWindow, x: i32, y: i32) {
     let scale = window.scale_factor().unwrap_or(1.0);
     if let Some(state) = window.app_handle().try_state::<Arc<ClickThrough>>() {
+        // Win32 returns the cursor in physical pixels while AppKit returns
+        // points, so the poller needs the scale to line both spaces up.
+        state.set_scale(scale);
         state.set_frame(
             f64::from(x) / scale,
             f64::from(y) / scale,
@@ -577,6 +584,10 @@ fn popup_pet_menu(app: &AppHandle) -> Result<(), String> {
         .text("pat", "摸摸头")
         .item(&play)
         .separator()
+        .text("focus", "开始 / 结束专注")
+        .text("music", "放点轻音乐")
+        .text("reminders", "看看提醒")
+        .separator()
         .item(&always_on_top)
         .text("settings", "设置")
         .text("hide", "暂时隐藏")
@@ -613,6 +624,11 @@ fn create_tray(app: &AppHandle) -> tauri::Result<()> {
     let menu = MenuBuilder::new(app)
         .text("toggle", "显示 / 隐藏大肥鱼")
         .text("chat", "和她聊天")
+        .separator()
+        .text("focus", "开始 / 结束专注")
+        .text("music", "放点轻音乐")
+        .text("reminders", "看看提醒")
+        .separator()
         .text("settings", "设置")
         .separator()
         .text("quit", "退出")
@@ -636,6 +652,22 @@ fn create_tray(app: &AppHandle) -> tauri::Result<()> {
         })
         .build(app)?;
     Ok(())
+}
+
+/// Polls the reminder store and hands due items to the renderer. The window is
+/// shown first so a reminder is not silently delivered to a hidden pet.
+fn spawn_reminder_watcher(app: AppHandle, store: Arc<ReminderStore>) {
+    thread::spawn(move || loop {
+        thread::sleep(REMINDER_POLL);
+        let due = store.take_due(reminders::now_ms());
+        if due.is_empty() {
+            continue;
+        }
+        if let Some(window) = app.get_webview_window(PET_WINDOW_LABEL) {
+            let _ = window.show();
+            let _ = window.emit("reminder-due", &due);
+        }
+    });
 }
 
 // macOS has no cross-platform sleep notification here, so a wall-clock gap is
@@ -667,6 +699,27 @@ fn spawn_wake_watcher(app: AppHandle) {
             }
         }
     });
+}
+
+#[tauri::command]
+fn list_reminders(store: State<'_, Arc<ReminderStore>>) -> Vec<Reminder> {
+    store.list()
+}
+
+#[tauri::command]
+fn add_reminder(
+    store: State<'_, Arc<ReminderStore>>,
+    text: String,
+    minutes: Option<u32>,
+    at: Option<String>,
+) -> Result<Reminder, String> {
+    let due = reminders::resolve_due(minutes, at.as_deref())?;
+    store.add(&text, due)
+}
+
+#[tauri::command]
+fn remove_reminder(store: State<'_, Arc<ReminderStore>>, id: String) -> bool {
+    store.remove(&id)
 }
 
 #[tauri::command]
@@ -756,6 +809,96 @@ fn open_settings(app: AppHandle) -> Result<(), String> {
     create_settings_window(&app)
 }
 
+/// Opens a link from a chat reply in the default browser. Only http(s) is
+/// accepted, so a model reply cannot launch a program or a local file.
+#[tauri::command]
+fn open_external(url: String) -> Result<(), String> {
+    open_external_url(&url)
+}
+
+/// Plays music through a local player when one is installed, and falls back to
+/// a browser search page otherwise.
+#[tauri::command]
+async fn play_music(
+    query: Option<String>,
+    site: Option<String>,
+    player: Option<String>,
+) -> Result<String, String> {
+    let query = query.unwrap_or_default();
+    let site = site.unwrap_or_else(|| "netease".to_string());
+    let player = player.unwrap_or_else(|| "auto".to_string());
+    tauri::async_runtime::spawn_blocking(move || music::play(&player, &site, &query))
+        .await
+        .map_err(|error| format!("播放任务失败：{error}"))?
+}
+
+/// Shared by the IPC command and the `play_music` agent tool.
+pub(crate) fn open_external_url(url: &str) -> Result<(), String> {
+    open_url(&validate_external_link(url)?)
+}
+
+fn validate_external_link(raw: &str) -> Result<String, String> {
+    let url = raw.trim();
+    if url.is_empty() || url.len() > 2048 {
+        return Err("链接长度不正确".to_string());
+    }
+    if url
+        .chars()
+        .any(|character| character.is_control() || character.is_whitespace())
+    {
+        return Err("链接包含非法字符".to_string());
+    }
+    let lower = url.to_ascii_lowercase();
+    if !(lower.starts_with("https://") || lower.starts_with("http://")) {
+        return Err("只允许打开 http/https 链接".to_string());
+    }
+    Ok(url.to_string())
+}
+
+#[cfg(target_os = "windows")]
+fn open_url(url: &str) -> Result<(), String> {
+    use windows_sys::Win32::UI::Shell::ShellExecuteW;
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+
+    let operation: Vec<u16> = "open\0".encode_utf16().collect();
+    let target: Vec<u16> = url.encode_utf16().chain(std::iter::once(0)).collect();
+    // SAFETY: both strings are NUL-terminated and outlive the call; the return
+    // value is an HINSTANCE-style status code where anything above 32 is OK.
+    let result = unsafe {
+        ShellExecuteW(
+            std::ptr::null_mut(),
+            operation.as_ptr(),
+            target.as_ptr(),
+            std::ptr::null(),
+            std::ptr::null(),
+            SW_SHOWNORMAL,
+        )
+    };
+    if result as isize > 32 {
+        Ok(())
+    } else {
+        Err("无法打开系统浏览器".to_string())
+    }
+}
+
+#[cfg(target_os = "macos")]
+fn open_url(url: &str) -> Result<(), String> {
+    std::process::Command::new("open")
+        .arg(url)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("无法打开系统浏览器：{error}"))
+}
+
+#[cfg(not(any(target_os = "windows", target_os = "macos")))]
+fn open_url(url: &str) -> Result<(), String> {
+    std::process::Command::new("xdg-open")
+        .arg(url)
+        .spawn()
+        .map(|_| ())
+        .map_err(|error| format!("无法打开系统浏览器：{error}"))
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     tauri::Builder::default()
@@ -771,6 +914,8 @@ pub fn run() {
                 store: Mutex::new(store),
                 agent,
             });
+            let reminders = Arc::new(ReminderStore::load(&app.path().app_config_dir()?));
+            app.manage(reminders.clone());
             let click_through = Arc::new(ClickThrough::new());
             app.manage(click_through.clone());
             if let Some(monitor) = app.primary_monitor()? {
@@ -791,6 +936,7 @@ pub fn run() {
 
             create_tray(app.handle())?;
             spawn_wake_watcher(app.handle().clone());
+            spawn_reminder_watcher(app.handle().clone(), reminders);
             if let Some(window) = pet_window {
                 hittest::spawn_watcher(window, click_through);
             }
@@ -800,6 +946,9 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             get_settings,
             save_settings,
+            list_reminders,
+            add_reminder,
+            remove_reminder,
             agent::agent_sessions,
             agent::agent_open_session,
             agent::agent_new_session,
@@ -816,6 +965,8 @@ pub fn run() {
             walk_pet,
             show_pet_menu,
             open_settings,
+            open_external,
+            play_music,
             smoke::smoke_report
         ])
         .build(tauri::generate_context!())
@@ -834,7 +985,8 @@ pub fn run() {
 #[cfg(test)]
 mod tests {
     use super::{
-        clamp_position, overlap_area, pick_work_area, scale_delta, visible_area, Reach,
+        clamp_position, overlap_area, pick_work_area, scale_delta, validate_external_link,
+        visible_area, Reach,
     };
 
     /// Two 1920x1080 screens side by side, the second one offset downwards.
@@ -860,6 +1012,19 @@ mod tests {
         assert_eq!(scale_delta(-3, 2.0), -6);
         assert_eq!(scale_delta(3, 1.5), 5);
         assert_eq!(scale_delta(0, 2.0), 0);
+    }
+
+    #[test]
+    fn only_web_links_can_be_opened() {
+        assert_eq!(
+            validate_external_link("https://example.com/a?b=1").unwrap(),
+            "https://example.com/a?b=1"
+        );
+        assert!(validate_external_link("http://localhost:8080").is_ok());
+        assert!(validate_external_link("javascript:alert(1)").is_err());
+        assert!(validate_external_link("file:///C:/Windows/System32/cmd.exe").is_err());
+        assert!(validate_external_link("https://example.com/a b").is_err());
+        assert!(validate_external_link("   ").is_err());
     }
 
     #[test]

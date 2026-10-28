@@ -65,6 +65,11 @@ pub struct Policy<'a> {
 pub struct Launch {
     pub program: PathBuf,
     pub args: Vec<String>,
+    /// Appended verbatim to the command line. `cmd.exe` has no backslash
+    /// escapes, so Rust's standard argument quoting would corrupt a command
+    /// that contains quotes; the Windows shell path uses this instead.
+    #[cfg_attr(not(target_os = "windows"), allow(dead_code))]
+    pub raw: Option<String>,
 }
 
 /// Wraps `command` so it runs inside the sandbox.
@@ -86,6 +91,7 @@ fn wrap_with(program: &Path, command: &str, policy: &Policy<'_>) -> Result<Launc
             "-c".to_string(),
             command.to_string(),
         ],
+        raw: None,
     })
 }
 
@@ -171,7 +177,7 @@ fn expand(base: &Path, directory: &Path, allowed: &mut Vec<PathBuf>) {
         let Ok(relative) = path.strip_prefix(base) else {
             continue;
         };
-        let relative = relative.to_string_lossy().to_lowercase();
+        let relative = relative.to_string_lossy().to_lowercase().replace('\\', "/");
         if risk::SENSITIVE.contains(&relative.as_str()) {
             continue;
         }
