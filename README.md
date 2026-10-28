@@ -8,9 +8,9 @@
 
 ## 功能
 
-- 透明、无边框、置顶的 `360 × 560` 桌宠窗口，靠近屏幕边缘不会拉伸气泡
+- 透明、无边框、置顶的 `360 × 560` 桌宠窗口，靠近屏幕边缘不会拉伸气泡；拖动和自动散步都能跨到其它显示器
 - 按立绘轮廓穿透点击：空白区域的点击直接落到后面的窗口，立绘范围内照常拖动、点击和右键
-- 菜单栏常驻图标，不占用 Dock；左键显示/隐藏，右键打开菜单
+- 菜单栏常驻图标，不占用 Dock；左键显示/隐藏，右键是「显示/隐藏、和她聊天、设置、退出」
 - 原生右键菜单：聊天、投喂、摸头、陪玩、置顶、设置、隐藏、退出
 - 待机呼吸浮动与 2.8-7 秒不定时整帧眨眼
 - 点击、拖拽、鼠标悬停和键盘操作反馈；快速绕圈拖动会转晕
@@ -20,6 +20,7 @@
 - 随机闲置彩蛋与 31 张固定锚点 PNG 表情、道具和动作帧
 - 休眠恢复检测，醒来后随机触发“伸懒腰”或“惊醒”
 - Agent harness：多会话管理、上下文预算与自动压缩、流式输出、工具调用与后台多步任务
+- 后台任务有专属通知气泡（需要审批 / 完成 / 失败），样式与聊天气泡、台词气泡区分开
 - 气泡式聊天：不遮挡桌宠、限制最大高度、底色透明，可切换/新建/删除会话
 - 默认使用免 Key 的 Pollinations OpenAI 兼容接口，可切换 DeepSeek 或任意 OpenAI 兼容 API
 - API Key 只保存在本机的设置文件里（权限 0600），不写入系统钥匙串，避免申请访问其他密钥的权限
@@ -29,7 +30,7 @@
 - macOS 10.15 或更高版本
 - Xcode Command Line Tools：`xcode-select --install`
 - Rust stable：<https://rustup.rs>
-- Node.js 20 或更高版本
+- Node.js 20 或更高版本（`npm test` 使用内置的 `node --test`）
 
 ## 快速开始
 
@@ -62,6 +63,7 @@ npm run build    # 打包 .app 与 .dmg
 | 快速绕圈拖动 | 松手后触发晕眩、转圈星星与专属台词 |
 | 右键 | 回应“干嘛？”并打开原生菜单 |
 | `Enter` / 空格 | 聚焦宠物后打开聊天 |
+| 点击通知气泡 | 打开对应会话（后台任务需要审批时卡片已在其中） |
 
 ## 模型设置
 
@@ -77,8 +79,8 @@ npm run build    # 打包 .app 与 .dmg
 
 ### DeepSeek
 
-- API 地址：`https://api.deepseek.com/chat/completions`
-- 模型：`deepseek-chat`
+- API 地址：`https://api.deepseek.com/chat/completions`（官方文档里的 base_url 是 `https://api.deepseek.com`；`/v1/chat/completions` 只是兼容写法，旧配置里出现这个形式会在启动时自动改回上面的地址）
+- 模型：`deepseek-chat`（想省钱可改成账号可用的其它模型名，如 `deepseek-reasoner`）
 - 在设置页填写自己的 API Key
 
 ### 自定义 OpenAI 兼容服务
@@ -89,7 +91,7 @@ npm run build    # 打包 .app 与 .dmg
 
 ```bash
 npm test           # Node 内置测试：作息、行为目录、手势与平台桥接
-npm run test:rust  # Rust 测试：聊天请求构造与设置校验
+npm run test:rust  # Rust 测试：会话存储、上下文压缩、风险分级、工具执行、SSE 解析与设置校验
 npm run check      # 检查关键文件存在且脚本语法有效
 npm run smoke      # 启动已打包的 .app 做端到端自检（需先 npm run build）
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
@@ -116,8 +118,8 @@ deepfish-desktop-pet-macos/
 │  ├─ renderer/            # 桌宠、聊天与设置界面
 │  └─ shared/              # 作息、行为目录、手势与 Tauri 桥接
 ├─ src-tauri/
-│  ├─ src/                 # Rust 后端：窗口、菜单栏、菜单、设置
-│  │  └─ agent/            # Agent harness：会话、上下文压缩、工具循环
+│  ├─ src/                 # Rust 后端：窗口、菜单栏、穿透点击、聊天传输、设置
+│  │  └─ agent/            # Agent harness：会话、上下文压缩、风险分级、工具循环
 │  ├─ capabilities/        # Tauri 权限
 │  ├─ icons/               # 应用图标与菜单栏图标
 │  ├─ Info.plist           # LSUIElement 等 macOS 配置
@@ -125,7 +127,7 @@ deepfish-desktop-pet-macos/
 └─ test/                   # Node.js 内置测试
 ```
 
-`src/shared/desktop-bridge.js` 用 `window.__TAURI__` 暴露与上游 Electron preload 完全一致的 `window.deepFish` API，因此界面代码与上游保持一致，只有平台桥接不同。
+`src/shared/desktop-bridge.js` 用 `window.__TAURI__` 暴露 `window.deepFish`：桌面交互（拖动、菜单、设置、台词事件）沿用上游 Electron preload 的形状，另外增加了 `agent`（会话、发送、审批、事件订阅）、`setHitMask` / `pinClickThrough`（穿透点击）与 `onSpeak` 三组 macOS 侧能力。
 
 素材制作脚本（`prepare-generated-frame.py` 等）与 Windows 启动器保留在上游仓库；本仓库直接使用已经处理好的 PNG 帧。替换角色时请保持每张画布尺寸与脚底锚点一致，并同步更新 `src/renderer/app.js` 中的 `frameNames`。
 
@@ -155,15 +157,15 @@ deepfish-desktop-pet-macos/
   | `list_dir` | 列出主目录内某个目录 | 自动执行（敏感目录需审批） |
   | `read_file` | 读取主目录内文本文件（默认 200 行、单次最多 400 行 / 200 KB） | 自动执行（敏感目录需审批） |
   | `write_file` | 覆盖或新建文件，自动建父目录，单次上限 200 KB | **每次都要审批** |
-  | `run_command` | 在 `sh -c` 里执行命令，默认 15 s 超时、最长 60 s，输出截断到 6000 字符 | 只读命令自动执行，其它需审批 |
+  | `run_command` | 在 `sh -c` 里执行命令，默认 15 s 超时、最长 600 s，输出截断到 6000 字符 | 只读命令自动执行，其它需审批 |
 
 - **作用范围**：文件工具只能触碰 `$HOME` 之内（`~` / `~/x` 写法，`..` 逃逸会直接拒绝）；`DEEPFISH_TOOL_ROOT` 可整体收窄或放宽这个根目录。命令无法真正沙箱化，所以"超出主目录"的路径、重定向、命令替换、`&&`/`;` 一律升级为审批。
 - **风险分级**（`src-tauri/src/agent/risk.rs`）：
   - **自动执行**：`ls / pwd / cat / head / tail / wc / grep / rg / find / stat / du / df / jq / diff …` 这类只读命令，以及 `git status|diff|log|show|branch|rev-parse …`、`node --version`；管道里的每一段都必须是只读命令，且不能引用凭据路径。
-  - **需要审批**：`write_file`、所有写操作、未知程序（`npm test`、`sed -i`、`find -delete`、`git push`、`rm -rf build`…），以及读取 `.ssh`、`.aws`、`.npmrc`、钥匙串、本应用设置等敏感路径。审批卡片出现在聊天里，显示将要执行的具体内容，`允许` / `拒绝` 二选一，**120 秒不点视为拒绝**；每次都问，不记忆。
+  - **需要审批**：`write_file`、所有写操作、未知程序（`npm test`、`sed -i`、`find -delete`、`git push`、`rm -rf build`…），以及读取 `.ssh`、`.aws`、`.npmrc`、钥匙串、本应用设置等敏感路径。审批卡片出现在聊天里，显示将要执行的具体内容，`允许` / `拒绝` 二选一，**300 秒不点视为拒绝**；每次都问，不记忆。
   - **直接拒绝**：`sudo`/`su`、`shutdown`/`reboot`/`diskutil`/`mkfs`/`dd`、`security`（钥匙串命令行）、`launchctl`/`csrutil`/`nvram`/`tccutil`、`osascript`，以及 `curl`/`wget`/`ssh`/`scp`/`nc` 等外网与远程工具——避免读完本地文件再发出去。
 - **被拒绝之后**：模型会收到一条明确的工具结果（"用户拒绝了这次操作" / "该操作被安全策略禁止"），系统提示要求它不要重试同一调用，改换方式或直接说明做不到。
-- **后台任务**：一次回复的多步执行完全在 Rust 侧（工具在阻塞线程池里跑，不会卡住其它会话的流式输出），关闭聊天、切换会话都不会打断；结果写入会话，重新打开即能看到。命令超时上限 600 s，单次请求最多 8 步工具循环，审批等待窗口 300 s。
+- **后台任务**：一次回复的多步执行完全在 Rust 侧（工具在阻塞线程池里跑，不会卡住其它会话的流式输出），关闭聊天、切换会话都不会打断；结果写入会话，重新打开即能看到。命令超时上限 600 s，工具循环与工具调用次数按设置页的「Agent 上限」执行（默认 50 轮 / 10 次），审批等待窗口 300 s。
 - **桌宠通知气泡**：后台任务不看聊天窗口也能知道进展——需要审批时宠物头顶弹出「🔐 需要审批 / 主人，有一个操作需要审批」，任务结束弹出「✅ 任务完成 / 主人，任务完成了」或「⚠ 任务失败 / 主人，任务失败了」。这个气泡是深色卡片、左侧彩色强调条、没有小尾巴，和聊天气泡、动作台词气泡都不一样；点它直接打开对应会话（需要审批时卡片已经在那儿等着）。聊天窗口正开着且就是该会话时不再弹气泡，避免重复打扰。
 
 ## 实现说明

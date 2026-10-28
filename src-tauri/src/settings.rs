@@ -10,6 +10,11 @@ pub const DEFAULT_TOOL_CALL_LIMIT: u32 = 10;
 const MAX_AGENT_LOOP_LIMIT: u32 = 200;
 const MAX_TOOL_CALL_LIMIT: u32 = 100;
 
+/// DeepSeek's OpenAI-compatible chat endpoint. The `/v1` form appears in older
+/// configs and in copy-pasted snippets, so it is rewritten on load.
+pub const DEEPSEEK_ENDPOINT: &str = "https://api.deepseek.com/chat/completions";
+const LEGACY_DEEPSEEK_ENDPOINT: &str = "https://api.deepseek.com/v1/chat/completions";
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 #[allow(clippy::struct_excessive_bools)] // feature toggles are genuinely independent
@@ -87,11 +92,21 @@ pub struct SettingsStore {
 impl SettingsStore {
     pub fn load(directory: &Path) -> Self {
         let path = directory.join("settings.json");
-        let data = fs::read_to_string(&path)
+        let mut data = fs::read_to_string(&path)
             .ok()
             .and_then(|text| serde_json::from_str::<Settings>(&text).ok())
             .unwrap_or_default();
-        Self { path, data }
+        // Old builds shipped the `/v1` variant; fold it into the canonical URL
+        // so users do not keep a stale address forever.
+        let legacy_endpoint = data.endpoint.trim().trim_end_matches('/') == LEGACY_DEEPSEEK_ENDPOINT;
+        if legacy_endpoint {
+            data.endpoint = DEEPSEEK_ENDPOINT.to_string();
+        }
+        let store = Self { path, data };
+        if legacy_endpoint {
+            let _ = store.persist();
+        }
+        store
     }
 
     pub fn public_value(&self) -> PublicSettings {
@@ -246,6 +261,24 @@ mod tests {
             let mode = fs::metadata(dir.join("settings.json")).unwrap().permissions().mode();
             assert_eq!(mode & 0o777, 0o600);
         }
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn migrates_the_legacy_deepseek_endpoint() {
+        let dir = std::env::temp_dir().join(format!("deepfish-legacy-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::write(
+            dir.join("settings.json"),
+            r#"{"provider":"deepseek","endpoint":"https://api.deepseek.com/v1/chat/completions"}"#,
+        )
+        .unwrap();
+
+        let store = SettingsStore::load(&dir);
+        assert_eq!(store.data.endpoint, DEEPSEEK_ENDPOINT);
+        let saved = fs::read_to_string(dir.join("settings.json")).unwrap();
+        assert!(saved.contains(DEEPSEEK_ENDPOINT));
+        assert!(!saved.contains("/v1/chat"));
         fs::remove_dir_all(dir).ok();
     }
 
