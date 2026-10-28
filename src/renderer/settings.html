@@ -26,6 +26,11 @@
           <label class="field"><span>模型名称</span><input id="model" name="model" required></label>
           <label class="field" id="key-field"><span>API Key</span><input id="api-key" name="apiKey" type="password" autocomplete="new-password" placeholder="未填写"><small id="key-status"></small><small class="field-hint">只保存在本机配置文件中（权限 0600），不写入系统钥匙串，也不会申请访问其他密钥</small></label>
           <label class="check"><input id="clear-key" type="checkbox"><span>清除已保存的 API Key</span></label>
+          <div id="deepseek-tools" class="tool-toggles">
+            <label class="check"><input id="deepseek-search" type="checkbox"><span>开启联网搜索（Search）</span></label>
+            <label class="check"><input id="deepseek-fetch" type="checkbox"><span>开启网页抓取（Fetch）</span></label>
+            <small class="field-hint">开启后模型多出 <code>web_search</code> / <code>web_fetch</code> 两个工具，查询词与链接会发给 DeepSeek 的 <code>/v1/tools/*</code> 接口；按成功请求计费（各 5 元 / 1000 次），仅在使用 DeepSeek 时可用。</small>
+          </div>
         </section>
 
         <section>

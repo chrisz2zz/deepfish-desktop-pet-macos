@@ -2,6 +2,7 @@ pub mod context;
 pub mod risk;
 pub mod session;
 pub mod tools;
+pub mod web;
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -432,7 +433,16 @@ async fn run_loop(
         // and so does every pass once the tool budget is spent.
         let use_tools = step < loop_limit && tool_calls_used < call_limit;
         let messages = runtime.context(session_id, use_tools)?;
-        let tools = use_tools.then(tools::specs);
+        // DeepSeek's web tools need its own key, so they are only registered when
+        // the user switched them on and the provider is DeepSeek.
+        let deepseek = settings.provider == "deepseek";
+        let tool_context = tools::ToolContext::new(
+            risk::tool_root(),
+            api_key.map(str::to_string),
+            deepseek && settings.deepseek_search,
+            deepseek && settings.deepseek_fetch,
+        );
+        let tools = use_tools.then(|| tools::specs(&tool_context));
         let body = chat::payload(settings, messages, tools, true, MAX_REPLY_TOKENS);
         let outcome = chat::stream_completion(
             settings,
@@ -483,7 +493,7 @@ async fn run_loop(
             break;
         }
 
-        let root = risk::tool_root();
+        let root = tool_context.root.clone();
         for call in &calls {
             if runtime.is_cancelled(session_id, request_id) {
                 break;
@@ -552,10 +562,10 @@ async fn run_loop(
                     json!({ "type": "tool", "status": "running", "name": call.name, "display": tools::label(&call.name) }),
                 );
                 let tool_app = app.clone();
-                let tool_root = root.clone();
+                let tool_context = tool_context.clone();
                 let tool_call = call.clone();
                 match tauri::async_runtime::spawn_blocking(move || {
-                    tools::execute(&tool_app, &tool_root, &tool_call)
+                    tools::execute(&tool_app, &tool_context, &tool_call)
                 })
                 .await
                 {

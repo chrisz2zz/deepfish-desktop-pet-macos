@@ -4,22 +4,27 @@ import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), "..");
-const binary = path.join(
-  root,
-  "src-tauri",
-  "target",
-  "release",
-  "bundle",
-  "macos",
-  "大肥鱼桌宠.app",
-  "Contents",
-  "MacOS",
-  "deepfish-desktop-pet"
-);
+// `DEEPFISH_BINARY` lets a debug build run the same checks without packaging.
+const binary =
+  process.env.DEEPFISH_BINARY ??
+  path.join(
+    root,
+    "src-tauri",
+    "target",
+    "release",
+    "bundle",
+    "macos",
+    "大肥鱼桌宠.app",
+    "Contents",
+    "MacOS",
+    "deepfish-desktop-pet"
+  );
 const output = path.join(root, "work", "smoke-macos");
 
 if (!fs.existsSync(binary)) {
-  throw new Error(`Missing macOS build at ${binary}. Run "npm run mac:build" first.`);
+  throw new Error(
+    `Missing macOS build at ${binary}. Run "npm run build" first, or set DEEPFISH_BINARY to a debug binary.`
+  );
 }
 
 fs.rmSync(output, { recursive: true, force: true });
@@ -58,7 +63,11 @@ const expectations = [
   [pet.phase?.length > 0, "circadian phase label is empty"],
   [settings.bridge === true, "settings window is missing the Tauri bridge"],
   [settings.formVisible === true, "settings form did not render"],
-  [settings.savedProvider === "pollinations", "settings were not persisted through the backend"]
+  // The settings stage only toggles always-on-top, so the provider must survive
+  // the round-trip whatever it was: users are free to run DeepSeek or custom.
+  [settings.savedProvider === settings.provider, "settings were not persisted through the backend"],
+  [settings.savedAlwaysOnTop === true, "always-on-top was not persisted"],
+  [typeof settings.hasApiKey === "boolean", "api key status is missing"]
 ];
 
 const failed = expectations.filter(([passed]) => !passed).map(([, message]) => message);

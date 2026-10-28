@@ -5,6 +5,9 @@ const apiKey = document.querySelector("#api-key");
 const keyField = document.querySelector("#key-field");
 const keyStatus = document.querySelector("#key-status");
 const clearKey = document.querySelector("#clear-key");
+const deepseekTools = document.querySelector("#deepseek-tools");
+const deepseekSearch = document.querySelector("#deepseek-search");
+const deepseekFetch = document.querySelector("#deepseek-fetch");
 const alwaysOnTop = document.querySelector("#always-on-top");
 const sound = document.querySelector("#sound");
 const freeWalk = document.querySelector("#free-walk");
@@ -33,6 +36,7 @@ function updateKeyVisibility() {
   const needsKey = selectedProvider() !== "pollinations";
   keyField.hidden = !needsKey;
   clearKey.parentElement.hidden = !needsKey;
+  deepseekTools.hidden = selectedProvider() !== "deepseek";
 }
 
 function selectProvider(provider, fillPreset = true) {
@@ -67,6 +71,8 @@ form.addEventListener("submit", async (event) => {
       spicyLines: spicyLines.checked,
       scale: Number(scale.value),
       behaviorIntensity: Number(behaviorIntensity.value),
+      deepseekSearch: deepseekSearch.checked,
+      deepseekFetch: deepseekFetch.checked,
       agentLoopLimit: Number(agentLoopLimit.value),
       toolCallLimit: Number(toolCallLimit.value)
     });
@@ -90,6 +96,8 @@ window.deepFish.getSettings().then((settings) => {
   spicyLines.checked = settings.spicyLines;
   scale.value = settings.scale;
   scaleOutput.value = `${Math.round(Number(settings.scale) * 100)}%`;
+  deepseekSearch.checked = Boolean(settings.deepseekSearch);
+  deepseekFetch.checked = Boolean(settings.deepseekFetch);
   agentLoopLimit.value = settings.agentLoopLimit;
   toolCallLimit.value = settings.toolCallLimit;
   behaviorIntensity.value = settings.behaviorIntensity;

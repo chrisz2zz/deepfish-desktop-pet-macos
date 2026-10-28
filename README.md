@@ -23,6 +23,7 @@
 - 后台任务有专属通知气泡（需要审批 / 完成 / 失败），样式与聊天气泡、台词气泡区分开
 - 气泡式聊天：不遮挡桌宠、限制最大高度、底色透明，可切换/新建/删除会话
 - 默认使用免 Key 的 Pollinations OpenAI 兼容接口，可切换 DeepSeek 或任意 OpenAI 兼容 API
+- 可选开启 DeepSeek 的联网搜索（Search）与网页抓取（Fetch），让桌宠能查实时信息
 - API Key 只保存在本机的设置文件里（权限 0600），不写入系统钥匙串，避免申请访问其他密钥的权限
 
 ## 环境要求
@@ -85,6 +86,18 @@ npm run build    # 打包 .app 与 .dmg
 - 模型：`deepseek-chat`（想省钱可改成账号可用的其它模型名，如 `deepseek-reasoner`）
 - 在设置页填写自己的 API Key
 
+#### 联网搜索与网页抓取（可选，默认关闭）
+
+设置页的 DeepSeek 区域有两个开关，打开后模型会多出两个工具：
+
+- `web_search` → `POST https://api.deepseek.com/v1/tools/search`，返回标题、链接、发布日期与摘要（支持 `site:` / `lang:` / `after:` 等搜索语法）
+- `web_fetch` → `POST https://api.deepseek.com/v1/tools/fetch`，把单个网页抓成 Markdown 正文
+
+两点提醒：
+
+- **按成功请求计费**（Search / Fetch 各 ¥5 / 1000 次，失败、无结果、超时不计费）；`count` 只影响返回条数，不改价格。
+- 开启后模型会把**查询词和链接**发给 DeepSeek 的 `/v1/tools/*` 接口——这正是你开启的意图，但也意味着这段内容离开了本机。工具结果会截断到约 4000 字符，避免一次搜索吃掉整个上下文预算。
+
 ### 自定义 OpenAI 兼容服务
 
 选择“自定义”，填写完整的 HTTPS Chat Completions 地址、模型名与可选 API Key。请求会带上 `stream: true`，按 Server-Sent Events 逐段渲染；如果服务端忽略该参数并直接返回完整 JSON，也会退化为一次性显示整段回复。
@@ -95,7 +108,8 @@ npm run build    # 打包 .app 与 .dmg
 npm test           # Node 内置测试：作息、行为目录、手势与平台桥接
 npm run test:rust  # Rust 测试：会话存储、上下文压缩、风险分级、工具执行、SSE 解析与设置校验
 npm run check      # 检查关键文件存在且脚本语法有效
-npm run smoke      # 启动已打包的 .app 做端到端自检（需先 npm run build）
+npm run smoke      # 启动已打包的 .app 做端到端自检（需先 npm run build；
+                   # 也可以 DEEPFISH_BINARY=src-tauri/target/debug/deepfish-desktop-pet npm run smoke 用调试版跑）
 cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 ```
 
@@ -108,6 +122,12 @@ Rust 侧在 `Cargo.toml` 的 `[lints.clippy]` 里开了 pedantic（放开了数�
 ```bash
 npm run web:prepare
 cargo test --manifest-path src-tauri/Cargo.toml -- --ignored
+```
+
+其中 `agent::web::tests::live_search_and_fetch` 会用本机设置里的 DeepSeek Key 真跑一次 Search + Fetch（会计费），只想验证模型对话可以单独过滤：
+
+```bash
+cargo test --manifest-path src-tauri/Cargo.toml --lib agent::web -- --ignored
 ```
 
 ## Windows / Linux 可行性与打包
@@ -212,6 +232,7 @@ deepfish-desktop-pet-macos/
 - 设置（含 API Key）保存在 `~/Library/Application Support/com.deepfish.desktop-pet/settings.json`，文件权限为 `0600`，只有当前用户可读；旧版本存在系统钥匙串里的 Key 不会自动迁移，需要重新填写一次。
 - 会话历史保存在同一目录的 `agent/sessions.json`，只在本机；模型只能调用白名单工具，文件与命令访问被限制在用户主目录内，并按风险等级自动执行或要求确认（见下节）。
 - 公共免费模型的请求会离开本机，请先阅读服务提供方条款。
+- 打开「联网搜索 / 网页抓取」后，模型发起的查询词和网页链接会被发送到 DeepSeek 的 `/v1/tools/*` 接口；不开启则这两个工具不会注册给模型。
 
 ## Agent 能力
 
@@ -231,10 +252,12 @@ deepfish-desktop-pet-macos/
   | `read_file` | 读取主目录内文本文件（默认 200 行、单次最多 400 行 / 200 KB） | 自动执行（敏感目录需审批） |
   | `write_file` | 覆盖或新建文件，自动建父目录，单次上限 200 KB | **每次都要审批** |
   | `run_command` | 在 `sh -c` 里执行命令，默认 15 s 超时、最长 600 s，输出截断到 6000 字符 | 只读命令自动执行，其它需审批 |
+  | `web_search` | DeepSeek 联网搜索，返回标题/链接/摘要（需在设置里开启） | 开启后自动执行 |
+  | `web_fetch` | 抓取网页并转成 Markdown（需在设置里开启） | 开启后自动执行 |
 
 - **作用范围**：文件工具只能触碰 `$HOME` 之内（`~` / `~/x` 写法，`..` 逃逸会直接拒绝）；`DEEPFISH_TOOL_ROOT` 可整体收窄或放宽这个根目录。命令无法真正沙箱化，所以"超出主目录"的路径、重定向、命令替换、`&&`/`;` 一律升级为审批。
 - **风险分级**（`src-tauri/src/agent/risk.rs`）：
-  - **自动执行**：`ls / pwd / cat / head / tail / wc / grep / rg / find / stat / du / df / jq / diff …` 这类只读命令，以及 `git status|diff|log|show|branch|rev-parse …`、`node --version`；管道里的每一段都必须是只读命令，且不能引用凭据路径。
+  - **自动执行**：`web_search` / `web_fetch`（只有你在设置里打开开关时才会注册给模型）、`ls / pwd / cat / head / tail / wc / grep / rg / find / stat / du / df / jq / diff …` 这类只读命令，以及 `git status|diff|log|show|branch|rev-parse …`、`node --version`；管道里的每一段都必须是只读命令，且不能引用凭据路径。
   - **需要审批**：`write_file`、所有写操作、未知程序（`npm test`、`sed -i`、`find -delete`、`git push`、`rm -rf build`…），以及读取 `.ssh`、`.aws`、`.npmrc`、钥匙串、本应用设置等敏感路径。审批卡片出现在聊天里，显示将要执行的具体内容，`允许` / `拒绝` 二选一，**300 秒不点视为拒绝**；每次都问，不记忆。
   - **直接拒绝**：`sudo`/`su`、`shutdown`/`reboot`/`diskutil`/`mkfs`/`dd`、`security`（钥匙串命令行）、`launchctl`/`csrutil`/`nvram`/`tccutil`、`osascript`，以及 `curl`/`wget`/`ssh`/`scp`/`nc` 等外网与远程工具——避免读完本地文件再发出去。
 - **被拒绝之后**：模型会收到一条明确的工具结果（"用户拒绝了这次操作" / "该操作被安全策略禁止"），系统提示要求它不要重试同一调用，改换方式或直接说明做不到。

@@ -33,6 +33,10 @@ pub struct Settings {
     pub agent_loop_limit: u32,
     /// How many tool calls one user question may spend in total.
     pub tool_call_limit: u32,
+    /// DeepSeek server-side web search (billed per request).
+    pub deepseek_search: bool,
+    /// DeepSeek server-side page fetch (billed per request).
+    pub deepseek_fetch: bool,
     /// Kept in the local settings file only; never sent to the renderer.
     pub api_key: String,
 }
@@ -52,6 +56,8 @@ impl Default for Settings {
             behavior_intensity: 1.0,
             agent_loop_limit: DEFAULT_AGENT_LOOP_LIMIT,
             tool_call_limit: DEFAULT_TOOL_CALL_LIMIT,
+            deepseek_search: false,
+            deepseek_fetch: false,
             api_key: String::new(),
         }
     }
@@ -80,6 +86,8 @@ pub struct SettingsPatch {
     pub behavior_intensity: Option<f64>,
     pub agent_loop_limit: Option<u32>,
     pub tool_call_limit: Option<u32>,
+    pub deepseek_search: Option<bool>,
+    pub deepseek_fetch: Option<bool>,
     pub api_key: Option<String>,
     pub clear_api_key: Option<bool>,
 }
@@ -155,6 +163,12 @@ impl SettingsStore {
         }
         if let Some(value) = patch.tool_call_limit {
             self.data.tool_call_limit = value;
+        }
+        if let Some(value) = patch.deepseek_search {
+            self.data.deepseek_search = value;
+        }
+        if let Some(value) = patch.deepseek_fetch {
+            self.data.deepseek_fetch = value;
         }
 
         self.data.scale = clamp(self.data.scale, 0.6, 1.15);
@@ -319,6 +333,36 @@ mod tests {
             .unwrap();
         assert_eq!(saved.settings.agent_loop_limit, 12);
         assert_eq!(saved.settings.tool_call_limit, 4);
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn remembers_the_deepseek_web_tool_switches() {
+        let dir = std::env::temp_dir().join(format!("deepfish-web-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let mut store = SettingsStore::load(&dir);
+        assert!(!store.data.deepseek_search && !store.data.deepseek_fetch);
+
+        let saved = store
+            .save(SettingsPatch {
+                deepseek_search: Some(true),
+                ..SettingsPatch::default()
+            })
+            .unwrap();
+        assert!(saved.settings.deepseek_search);
+        assert!(!saved.settings.deepseek_fetch);
+
+        let saved = store
+            .save(SettingsPatch {
+                deepseek_fetch: Some(true),
+                ..SettingsPatch::default()
+            })
+            .unwrap();
+        assert!(saved.settings.deepseek_search && saved.settings.deepseek_fetch);
+
+        // Survives a reload from disk.
+        let reloaded = SettingsStore::load(&dir);
+        assert!(reloaded.data.deepseek_search && reloaded.data.deepseek_fetch);
         fs::remove_dir_all(dir).ok();
     }
 

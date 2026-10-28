@@ -333,6 +333,16 @@ pub fn plan(root: &Path, call: &ToolCall) -> Plan {
                 Risk::Blocked => Plan::blocked(format!("命令被安全策略禁止：{command}")),
             }
         }
+        // DeepSeek's server-side web tools only run when the user switched them
+        // on in the settings window, which counts as consent for the request.
+        "web_search" => Plan::safe(format!(
+            "联网搜索：{}",
+            super::session::truncate(&argument(&args, "query"), 60)
+        )),
+        "web_fetch" => Plan::safe(format!(
+            "抓取网页：{}",
+            super::session::truncate(&argument(&args, "url"), 80)
+        )),
         // Everything the pet can do to itself is harmless.
         _ => Plan::safe(call.name.clone()),
     }
@@ -430,6 +440,24 @@ mod tests {
         assert_eq!(command_risk(&root, "shutdown -h now"), Risk::Blocked);
         assert_eq!(command_risk(&root, "rm -rf /"), Risk::Blocked);
         assert_eq!(command_risk(&root, ""), Risk::Blocked);
+    }
+
+    #[test]
+    fn web_tools_are_safe_when_enabled() {
+        let root = home();
+        let planned = plan(
+            &root,
+            &call("web_search", r#"{"query":"DeepSeek 发布"}"#),
+        );
+        assert_eq!(planned.risk, Risk::Safe);
+        assert!(planned.summary.contains("联网搜索"));
+
+        let planned = plan(
+            &root,
+            &call("web_fetch", r#"{"url":"https://example.com/a"}"#),
+        );
+        assert_eq!(planned.risk, Risk::Safe);
+        assert!(planned.summary.contains("https://example.com/a"));
     }
 
     #[test]

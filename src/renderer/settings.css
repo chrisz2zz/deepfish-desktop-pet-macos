@@ -34,3 +34,8 @@ button:hover { filter: brightness(.96); }
 button.secondary { border: 1px solid #cbd3e2; background: white; color: #3b4965; }
 .status { min-height: 18px; margin: 0 0 10px; color: #28704b; font-size: 12px; text-align: right; }
 @media (max-width: 480px) { .settings-shell { padding: 16px; } section { padding: 14px; } .segmented { grid-template-columns: 1fr; } }
+
+.tool-toggles { display: grid; gap: 2px; margin-top: 10px; padding: 8px 10px; border: 1px solid #e3e8f1; border-radius: 8px; background: #fafbfe; }
+.tool-toggles .check { margin-top: 4px; }
+.tool-toggles code { padding: 0 3px; border-radius: 3px; background: #eef2f9; font-size: 11px; }
+.tool-toggles .field-hint { display: block; margin-top: 6px; line-height: 1.55; color: #7b879d; }

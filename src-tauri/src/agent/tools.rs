@@ -1,6 +1,6 @@
 use std::fmt::Write as _;
 use std::io::Write;
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 use std::time::{Duration, Instant};
 
@@ -42,6 +42,28 @@ const BEHAVIORS: &[(&str, &str)] = &[
     ("angry", "生气"),
     ("dizzy", "转晕"),
 ];
+
+/// Everything a tool needs besides its arguments. Owned so the loop can hand it
+/// to a blocking worker thread.
+#[derive(Clone, Default)]
+pub struct ToolContext {
+    pub root: PathBuf,
+    pub api_key: Option<String>,
+    /// DeepSeek server-side search/fetch, both opt-in in the settings window.
+    pub search: bool,
+    pub fetch: bool,
+}
+
+impl ToolContext {
+    pub fn new(root: PathBuf, api_key: Option<String>, search: bool, fetch: bool) -> Self {
+        Self {
+            root,
+            api_key,
+            search,
+            fetch,
+        }
+    }
+}
 
 pub enum ToolEffect {
     None,
@@ -97,13 +119,15 @@ pub fn label(name: &str) -> String {
         "read_file" => "📄 读文件".to_string(),
         "write_file" => "💾 写文件".to_string(),
         "run_command" => "⌨ 执行命令".to_string(),
+        "web_search" => "🔎 联网搜索".to_string(),
+        "web_fetch" => "🌐 抓取网页".to_string(),
         other => format!("🛠 {other}"),
     }
 }
 
-pub fn specs() -> Value {
+pub fn specs(context: &ToolContext) -> Value {
     let behaviors: Vec<&str> = BEHAVIORS.iter().map(|(id, _)| *id).collect();
-    json!([
+    let mut tools = json!([
         {
             "type": "function",
             "function": {
@@ -222,7 +246,43 @@ pub fn specs() -> Value {
                 }
             }
         }
-    ])
+    ]);
+    let list = tools.as_array_mut().expect("tool list is an array");
+    if context.search {
+        list.push(json!({
+            "type": "function",
+            "function": {
+                "name": "web_search",
+                "description": "用 DeepSeek 搜索接口查询实时网页，返回标题、链接和摘要。回答时效性问题前先搜索，并在回复里带上来源链接。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "query": { "type": "string", "description": "搜索词，支持 site:/lang:/after: 等语法" },
+                        "count": { "type": "integer", "description": "返回条数 1-20，默认 5" },
+                        "need_content": { "type": "boolean", "description": "是否同时返回网页正文，默认 false" }
+                    },
+                    "required": ["query"]
+                }
+            }
+        }));
+    }
+    if context.fetch {
+        list.push(json!({
+            "type": "function",
+            "function": {
+                "name": "web_fetch",
+                "description": "抓取单个网页并返回 Markdown 正文，适合读取搜索结果的链接。",
+                "parameters": {
+                    "type": "object",
+                    "properties": {
+                        "url": { "type": "string", "description": "完整的 http/https 链接" }
+                    },
+                    "required": ["url"]
+                }
+            }
+        }));
+    }
+    tools
 }
 
 fn argument(args: &Value, key: &str) -> Option<String> {
@@ -230,6 +290,49 @@ fn argument(args: &Value, key: &str) -> Option<String> {
         .and_then(Value::as_str)
         .map(|value| value.trim().to_string())
         .filter(|value| !value.is_empty())
+}
+
+fn run_web_search(context: &ToolContext, args: &Value) -> ToolOutcome {
+    let name = "web_search";
+    if !context.search {
+        return failure(name, "联网搜索没有开启，请先在设置里打开 DeepSeek 搜索。");
+    }
+    let Some(key) = context.api_key.as_deref() else {
+        return failure(name, "需要先在设置里填写 DeepSeek API Key。");
+    };
+    let query = argument(args, "query").unwrap_or_default();
+    let count = args.get("count").and_then(Value::as_u64).unwrap_or(5) as u32;
+    let need_content = args
+        .get("need_content")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
+    match super::web::search(key, &query, count, need_content) {
+        Ok(text) => ToolOutcome {
+            content: text,
+            display: format!("🔎 {}", super::session::truncate(&query, 30)),
+            effect: ToolEffect::None,
+        },
+        Err(error) => failure(name, format!("搜索失败：{error}")),
+    }
+}
+
+fn run_web_fetch(context: &ToolContext, args: &Value) -> ToolOutcome {
+    let name = "web_fetch";
+    if !context.fetch {
+        return failure(name, "网页抓取没有开启，请先在设置里打开 DeepSeek Fetch。");
+    }
+    let Some(key) = context.api_key.as_deref() else {
+        return failure(name, "需要先在设置里填写 DeepSeek API Key。");
+    };
+    let url = argument(args, "url").unwrap_or_default();
+    match super::web::fetch(key, &url) {
+        Ok(text) => ToolOutcome {
+            content: text,
+            display: format!("🌐 {}", super::session::truncate(&url, 40)),
+            effect: ToolEffect::None,
+        },
+        Err(error) => failure(name, format!("抓取失败：{error}")),
+    }
 }
 
 fn failure(name: &str, message: impl Into<String>) -> ToolOutcome {
@@ -459,8 +562,9 @@ fn run_command(root: &Path, command: &str, cwd: &Path, timeout: Duration) -> Too
     }
 }
 
-pub fn execute(app: &AppHandle, root: &Path, call: &ToolCall) -> ToolOutcome {
+pub fn execute(app: &AppHandle, ctx: &ToolContext, call: &ToolCall) -> ToolOutcome {
     let args: Value = serde_json::from_str(&call.arguments).unwrap_or(Value::Null);
+    let root = ctx.root.as_path();
     match call.name.as_str() {
         "get_time" => {
             let now = chrono::Local::now();
@@ -572,6 +676,8 @@ pub fn execute(app: &AppHandle, root: &Path, call: &ToolCall) -> ToolOutcome {
                 Err(error) => failure("write_file", error),
             }
         }
+        "web_search" => run_web_search(ctx, &args),
+        "web_fetch" => run_web_fetch(ctx, &args),
         "run_command" => {
             let command = argument(&args, "command").unwrap_or_default();
             if command.is_empty() {
@@ -601,9 +707,13 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
+    fn context(search: bool, fetch: bool) -> ToolContext {
+        ToolContext::new(PathBuf::from("/tmp"), Some("sk-test".to_string()), search, fetch)
+    }
+
     #[test]
     fn exposes_every_tool_with_a_schema() {
-        let specs = specs();
+        let specs = specs(&context(false, false));
         let names: Vec<&str> = specs
             .as_array()
             .unwrap()
@@ -629,6 +739,38 @@ mod tests {
             .unwrap()
             .iter()
             .any(|value| value == "walk"));
+    }
+
+    #[test]
+    fn registers_the_web_tools_only_when_enabled() {
+        let names = |context: &ToolContext| -> Vec<String> {
+            specs(context)
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| item.pointer("/function/name").unwrap().as_str().unwrap().to_string())
+                .collect()
+        };
+        assert!(!names(&context(false, false)).contains(&"web_search".to_string()));
+        assert!(!names(&context(false, false)).contains(&"web_fetch".to_string()));
+        assert!(names(&context(true, false)).contains(&"web_search".to_string()));
+        assert!(!names(&context(true, false)).contains(&"web_fetch".to_string()));
+        assert!(names(&context(false, true)).contains(&"web_fetch".to_string()));
+    }
+
+    #[test]
+    fn web_tools_refuse_when_disabled() {
+        let search = run_web_search(&context(false, false), &json!({ "query": "deepseek" }));
+        assert!(search.content.contains("没有开启"), "{}", search.content);
+
+        let fetch = run_web_fetch(&context(false, false), &json!({ "url": "https://example.com" }));
+        assert!(fetch.content.contains("没有开启"), "{}", fetch.content);
+
+        // Enabled but without a key: the tool explains what is missing instead
+        // of trying an unauthenticated request.
+        let keyless = ToolContext::new(PathBuf::from("/tmp"), None, true, true);
+        let search = run_web_search(&keyless, &json!({ "query": "deepseek" }));
+        assert!(search.content.contains("API Key"), "{}", search.content);
     }
 
     fn scratch(name: &str) -> PathBuf {
