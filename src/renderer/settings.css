@@ -20,6 +20,7 @@ h2 { margin: 0 0 15px; font-size: 14px; }
 .field input:not([type="range"]) { width: 100%; height: 38px; border: 1px solid #cbd3e2; border-radius: 6px; padding: 0 10px; outline: 0; color: #18264b; }
 .field input:focus { border-color: #2876e8; box-shadow: 0 0 0 3px rgba(40,118,232,.11); }
 .field small { color: #7b879d; }
+.field .field-hint { line-height: 1.5; }
 .check { display: flex; align-items: center; gap: 8px; margin-top: 10px; color: #65718a; font-size: 12px; }
 .switch-row { display: flex; align-items: center; justify-content: space-between; gap: 20px; padding: 10px 0; }
 .switch-row + .switch-row { border-top: 1px solid #edf0f5; }

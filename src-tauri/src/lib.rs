@@ -1,8 +1,10 @@
+mod agent;
 mod chat;
+mod hittest;
 mod settings;
 mod smoke;
 
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::thread;
 use std::time::{Duration, SystemTime};
 
@@ -15,19 +17,31 @@ use tauri::{
     WebviewWindowBuilder,
 };
 
-use chat::ChatMessage;
+use agent::AgentRuntime;
+use hittest::ClickThrough;
 use settings::{PublicSettings, SettingsPatch, SettingsStore};
 
 pub(crate) const PET_WINDOW_LABEL: &str = "pet";
 pub(crate) const SETTINGS_WINDOW_LABEL: &str = "settings";
-const PET_WINDOW_WIDTH: f64 = 340.0;
-const PET_WINDOW_HEIGHT: f64 = 430.0;
+const PET_WINDOW_WIDTH: f64 = 360.0;
+const PET_WINDOW_HEIGHT: f64 = 560.0;
 const PET_WINDOW_MARGIN: f64 = 30.0;
 const SLEEP_POLL: Duration = Duration::from_secs(15);
 const SLEEP_THRESHOLD: Duration = Duration::from_secs(90);
 
-struct AppState {
+pub(crate) struct AppState {
     store: Mutex<SettingsStore>,
+    agent: AgentRuntime,
+}
+
+/// Settings plus the stored key, cloned so callers never hold the settings
+/// lock across an await.
+pub(crate) fn chat_config(state: &AppState) -> (settings::Settings, Option<String>) {
+    let store = state
+        .store
+        .lock()
+        .unwrap_or_else(|error| error.into_inner());
+    (store.data.clone(), store.api_key())
 }
 
 #[derive(Debug, Serialize)]
@@ -88,25 +102,142 @@ fn apply_saved_settings(app: &AppHandle, saved: &PublicSettings) {
     }
 }
 
-fn clamp_to_work_area(window: &WebviewWindow, x: i32, y: i32) -> (i32, i32) {
-    let Ok(Some(monitor)) = window.current_monitor() else {
-        return (x, y);
+/// A screen work area in physical pixels: `(x, y, width, height)`.
+type WorkArea = (i32, i32, i32, i32);
+
+fn contains_point((ax, ay, aw, ah): WorkArea, x: i32, y: i32) -> bool {
+    x >= ax && x < ax + aw && y >= ay && y < ay + ah
+}
+
+/// A window spanning two screens is legal even though no single screen holds it,
+/// so the whole rect is checked against the union of every work area.
+fn is_fully_visible(areas: &[WorkArea], x: i32, y: i32, width: i32, height: i32) -> bool {
+    let holds_rect = |area: &WorkArea| {
+        let (ax, ay, aw, ah) = *area;
+        x >= ax && y >= ay && x + width <= ax + aw && y + height <= ay + ah
     };
-    let area = monitor.work_area();
+    if areas.iter().any(holds_rect) {
+        return true;
+    }
+    // Sample the rect including its edges and corners: sampling cell centres
+    // instead would let the window hang half a cell off the last screen.
+    const STEPS: i32 = 6;
+    let span = STEPS - 1;
+    for row in 0..STEPS {
+        for col in 0..STEPS {
+            let px = x + col * (width.max(1) - 1) / span;
+            let py = y + row * (height.max(1) - 1) / span;
+            if !areas.iter().any(|area| contains_point(*area, px, py)) {
+                return false;
+            }
+        }
+    }
+    true
+}
+
+fn overlap_area(area: WorkArea, x: i32, y: i32, width: i32, height: i32) -> i64 {
+    let (ax, ay, aw, ah) = area;
+    let right = (x + width).min(ax + aw).max(x);
+    let bottom = (y + height).min(ay + ah).max(y);
+    let left = x.max(ax);
+    let top = y.max(ay);
+    i64::from(right - left) * i64::from(bottom - top)
+}
+
+fn distance_sq(area: WorkArea, x: i32, y: i32, width: i32, height: i32) -> i64 {
+    let (ax, ay, aw, ah) = area;
+    let dx = (ax - (x + width)).max(x - (ax + aw)).max(0);
+    let dy = (ay - (y + height)).max(y - (ay + ah)).max(0);
+    i64::from(dx) * i64::from(dx) + i64::from(dy) * i64::from(dy)
+}
+
+/// Picks the screen a window belongs to: its centre wins, then the largest
+/// overlap, then the nearest screen so detached windows still come back.
+fn pick_work_area(areas: &[WorkArea], x: i32, y: i32, width: i32, height: i32) -> Option<WorkArea> {
+    if areas.is_empty() {
+        return None;
+    }
+    let center_x = x + width / 2;
+    let center_y = y + height / 2;
+    if let Some(area) = areas
+        .iter()
+        .find(|area| contains_point(**area, center_x, center_y))
+    {
+        return Some(*area);
+    }
+    areas.iter().copied().max_by_key(|area| {
+        (
+            overlap_area(*area, x, y, width, height),
+            -distance_sq(*area, x, y, width, height),
+        )
+    })
+}
+
+fn clamp_position(
+    areas: &[WorkArea],
+    x: i32,
+    y: i32,
+    width: i32,
+    height: i32,
+) -> Option<(i32, i32)> {
+    if is_fully_visible(areas, x, y, width, height) {
+        return Some((x, y));
+    }
+    let (ax, ay, aw, ah) = pick_work_area(areas, x, y, width, height)?;
+    let max_x = (ax + aw - width).max(ax);
+    let max_y = (ay + ah - height).max(ay);
+    Some((x.clamp(ax, max_x), y.clamp(ay, max_y)))
+}
+
+fn clamp_to_work_area(window: &WebviewWindow, x: i32, y: i32) -> (i32, i32) {
+    let fallback = || {
+        window.current_monitor().ok().flatten().map(|monitor| {
+            let area = monitor.work_area();
+            (
+                area.position.x,
+                area.position.y,
+                area.size.width as i32,
+                area.size.height as i32,
+            )
+        })
+    };
+    let mut areas: Vec<WorkArea> = window
+        .available_monitors()
+        .map(|monitors| {
+            monitors
+                .iter()
+                .map(|monitor| {
+                    let area = monitor.work_area();
+                    (
+                        area.position.x,
+                        area.position.y,
+                        area.size.width as i32,
+                        area.size.height as i32,
+                    )
+                })
+                .collect()
+        })
+        .unwrap_or_default();
+    if areas.is_empty() {
+        if let Some(area) = fallback() {
+            areas.push(area);
+        }
+    }
+    let scale = window.scale_factor().unwrap_or(1.0);
     let size = window.outer_size().unwrap_or_else(|_| {
-        let scale = monitor.scale_factor();
         PhysicalSize::new(
             (PET_WINDOW_WIDTH * scale).round() as u32,
             (PET_WINDOW_HEIGHT * scale).round() as u32,
         )
     });
-    let max_x = (area.position.x + area.size.width as i32 - size.width as i32).max(area.position.x);
-    let max_y =
-        (area.position.y + area.size.height as i32 - size.height as i32).max(area.position.y);
-    (
-        x.clamp(area.position.x, max_x),
-        y.clamp(area.position.y, max_y),
+    clamp_position(
+        &areas,
+        x,
+        y,
+        size.width as i32,
+        size.height as i32,
     )
+    .unwrap_or((x, y))
 }
 
 /// Webview pointer deltas are logical pixels, while window positions are physical,
@@ -128,10 +259,25 @@ fn move_by(window: &WebviewWindow, dx: i32, dy: i32) -> WalkResult {
     let target_y = position.y + scale_delta(dy, scale);
     let (x, y) = clamp_to_work_area(window, target_x, target_y);
     let _ = window.set_position(PhysicalPosition::new(x, y));
+    remember_window_frame(window, x, y);
     WalkResult {
         x,
         y,
         boundary: x != target_x || y != target_y,
+    }
+}
+
+/// The click-through poller cannot query window getters off the main thread,
+/// so the frame it hit-tests against is cached whenever the window moves.
+fn remember_window_frame(window: &WebviewWindow, x: i32, y: i32) {
+    let scale = window.scale_factor().unwrap_or(1.0);
+    if let Some(state) = window.app_handle().try_state::<Arc<ClickThrough>>() {
+        state.set_frame(
+            x as f64 / scale,
+            y as f64 / scale,
+            PET_WINDOW_WIDTH,
+            PET_WINDOW_HEIGHT,
+        );
     }
 }
 
@@ -318,21 +464,19 @@ fn save_settings(
 }
 
 #[tauri::command]
-async fn chat_send(
-    state: State<'_, AppState>,
-    messages: Vec<ChatMessage>,
-) -> Result<String, String> {
-    let (settings, api_key) = {
-        let store = state
-            .store
-            .lock()
-            .unwrap_or_else(|error| error.into_inner());
-        (store.data.clone(), store.api_key())
-    };
-    if settings.provider == "deepseek" && api_key.is_none() {
-        return Err("请先在设置中填写 DeepSeek API Key".to_string());
-    }
-    chat::chat(&settings, api_key.as_deref(), &messages).await
+fn set_hit_mask(
+    state: State<'_, Arc<ClickThrough>>,
+    cols: u32,
+    rows: u32,
+    cell: f64,
+    bits: Vec<u8>,
+) {
+    state.set_mask(cols, rows, cell, bits);
+}
+
+#[tauri::command]
+fn pin_click_through(state: State<'_, Arc<ClickThrough>>, pinned: bool) {
+    state.set_interactive(pinned);
 }
 
 #[tauri::command]
@@ -365,25 +509,51 @@ pub fn run() {
 
             let store = SettingsStore::load(&app.path().app_config_dir()?);
             let always_on_top = store.data.always_on_top;
+            let agent = AgentRuntime::new(&app.path().app_config_dir()?.join("agent"));
             app.manage(AppState {
                 store: Mutex::new(store),
+                agent,
             });
+            let click_through = Arc::new(ClickThrough::new());
+            app.manage(click_through.clone());
+            if let Some(monitor) = app.primary_monitor()? {
+                click_through.set_screen_height(
+                    monitor.size().height as f64 / monitor.scale_factor(),
+                );
+            }
 
+            let mut pet_window = None;
             if let Some(window) = app.get_webview_window(PET_WINDOW_LABEL) {
-                window.set_position(default_pet_position(app.handle()))?;
+                let position = default_pet_position(app.handle());
+                window.set_position(position)?;
                 window.set_always_on_top(always_on_top)?;
                 window.show()?;
+                remember_window_frame(&window, position.x, position.y);
+                pet_window = Some(window);
             }
 
             create_tray(app.handle())?;
             spawn_wake_watcher(app.handle().clone());
+            if let Some(window) = pet_window {
+                hittest::spawn_watcher(window, click_through);
+            }
             smoke::start_if_requested(app.handle().clone());
             Ok(())
         })
         .invoke_handler(tauri::generate_handler![
             get_settings,
             save_settings,
-            chat_send,
+            agent::agent_sessions,
+            agent::agent_open_session,
+            agent::agent_new_session,
+            agent::agent_rename_session,
+            agent::agent_delete_session,
+            agent::agent_send,
+            agent::agent_cancel,
+            agent::agent_approval,
+            agent::agent_compact,
+            set_hit_mask,
+            pin_click_through,
             move_pet,
             walk_pet,
             show_pet_menu,
@@ -396,7 +566,13 @@ pub fn run() {
 
 #[cfg(test)]
 mod tests {
-    use super::scale_delta;
+    use super::{clamp_position, overlap_area, pick_work_area, scale_delta};
+
+    /// Two 1920x1080 screens side by side, the second one offset downwards.
+    const SIDE_BY_SIDE: [(i32, i32, i32, i32); 2] =
+        [(0, 0, 1920, 1080), (1920, 120, 1920, 1080)];
+    const SINGLE: [(i32, i32, i32, i32); 1] = [(0, 0, 1920, 1080)];
+    const PET: (i32, i32) = (360, 560);
 
     #[test]
     fn scales_logical_deltas_for_retina_displays() {
@@ -405,5 +581,57 @@ mod tests {
         assert_eq!(scale_delta(-3, 2.0), -6);
         assert_eq!(scale_delta(3, 1.5), 5);
         assert_eq!(scale_delta(0, 2.0), 0);
+    }
+
+    #[test]
+    fn keeps_the_pet_inside_a_single_screen() {
+        assert_eq!(clamp_position(&SINGLE, -120, -40, PET.0, PET.1), Some((0, 0)));
+        assert_eq!(
+            clamp_position(&SINGLE, 1900, 900, PET.0, PET.1),
+            Some((1560, 520))
+        );
+        // The far edge of the only screen is already a legal position.
+        assert_eq!(
+            clamp_position(&SINGLE, 1560, 520, PET.0, PET.1),
+            Some((1560, 520))
+        );
+    }
+
+    #[test]
+    fn lets_the_window_cross_onto_the_next_screen() {
+        // A straddling window is legal, otherwise walking could never cross the seam.
+        assert_eq!(
+            clamp_position(&SIDE_BY_SIDE, 1800, 200, PET.0, PET.1),
+            Some((1800, 200))
+        );
+        // ... and the pet may travel to the far edge of the second screen.
+        assert_eq!(
+            clamp_position(&SIDE_BY_SIDE, 4000, 200, PET.0, PET.1),
+            Some((3480, 200))
+        );
+        // Below the second screen's work area it snaps back onto that screen.
+        assert_eq!(
+            clamp_position(&SIDE_BY_SIDE, 1900, 900, PET.0, PET.1),
+            Some((1920, 640))
+        );
+    }
+
+    #[test]
+    fn falls_back_to_the_nearest_screen_when_detached() {
+        // Centre inside the gap between the two screens: most overlap wins.
+        assert_eq!(
+            pick_work_area(&SIDE_BY_SIDE, 1700, 1100, PET.0, PET.1),
+            Some((1920, 120, 1920, 1080))
+        );
+        // Fully outside both screens: nearest screen wins.
+        assert_eq!(
+            pick_work_area(&SIDE_BY_SIDE, -900, 0, PET.0, PET.1),
+            Some((0, 0, 1920, 1080))
+        );
+        assert!(pick_work_area(&[], 0, 0, PET.0, PET.1).is_none());
+        assert_eq!(
+            overlap_area((0, 0, 1920, 1080), 0, 0, PET.0, PET.1),
+            i64::from(PET.0) * i64::from(PET.1)
+        );
     }
 }

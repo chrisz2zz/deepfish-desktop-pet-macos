@@ -3,6 +3,13 @@ use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
+/// Defaults for the agent loop guards. They keep a confused model from spinning
+/// forever, and both are editable in the settings window.
+pub const DEFAULT_AGENT_LOOP_LIMIT: u32 = 50;
+pub const DEFAULT_TOOL_CALL_LIMIT: u32 = 10;
+const MAX_AGENT_LOOP_LIMIT: u32 = 200;
+const MAX_TOOL_CALL_LIMIT: u32 = 100;
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
 pub struct Settings {
@@ -16,6 +23,12 @@ pub struct Settings {
     pub interactive_zones: bool,
     pub spicy_lines: bool,
     pub behavior_intensity: f64,
+    /// How many model round-trips one user question may take.
+    pub agent_loop_limit: u32,
+    /// How many tool calls one user question may spend in total.
+    pub tool_call_limit: u32,
+    /// Kept in the local settings file only; never sent to the renderer.
+    pub api_key: String,
 }
 
 impl Default for Settings {
@@ -31,6 +44,9 @@ impl Default for Settings {
             interactive_zones: true,
             spicy_lines: true,
             behavior_intensity: 1.0,
+            agent_loop_limit: DEFAULT_AGENT_LOOP_LIMIT,
+            tool_call_limit: DEFAULT_TOOL_CALL_LIMIT,
+            api_key: String::new(),
         }
     }
 }
@@ -56,6 +72,8 @@ pub struct SettingsPatch {
     pub interactive_zones: Option<bool>,
     pub spicy_lines: Option<bool>,
     pub behavior_intensity: Option<f64>,
+    pub agent_loop_limit: Option<u32>,
+    pub tool_call_limit: Option<u32>,
     pub api_key: Option<String>,
     pub clear_api_key: Option<bool>,
 }
@@ -76,9 +94,12 @@ impl SettingsStore {
     }
 
     pub fn public_value(&self) -> PublicSettings {
+        let mut settings = self.data.clone();
+        let has_api_key = self.api_key().is_some();
+        settings.api_key.clear();
         PublicSettings {
-            settings: self.data.clone(),
-            has_api_key: self.api_key().is_some(),
+            settings,
+            has_api_key,
         }
     }
 
@@ -113,18 +134,26 @@ impl SettingsStore {
         if let Some(value) = patch.behavior_intensity {
             self.data.behavior_intensity = value;
         }
+        if let Some(value) = patch.agent_loop_limit {
+            self.data.agent_loop_limit = value;
+        }
+        if let Some(value) = patch.tool_call_limit {
+            self.data.tool_call_limit = value;
+        }
 
         self.data.scale = clamp(self.data.scale, 0.6, 1.15);
         self.data.behavior_intensity = clamp(self.data.behavior_intensity, 0.5, 1.8);
+        self.data.agent_loop_limit = self.data.agent_loop_limit.clamp(1, MAX_AGENT_LOOP_LIMIT);
+        self.data.tool_call_limit = self.data.tool_call_limit.clamp(1, MAX_TOOL_CALL_LIMIT);
 
         if let Some(key) = patch.api_key {
             let key = key.trim();
             if !key.is_empty() {
-                keychain::write(key)?;
+                self.data.api_key = key.to_string();
             }
         }
         if patch.clear_api_key == Some(true) {
-            keychain::clear()?;
+            self.data.api_key.clear();
         }
 
         self.persist()?;
@@ -132,7 +161,8 @@ impl SettingsStore {
     }
 
     pub fn api_key(&self) -> Option<String> {
-        keychain::read()
+        let key = self.data.api_key.trim();
+        (!key.is_empty()).then(|| key.to_string())
     }
 
     fn persist(&self) -> Result<(), String> {
@@ -143,7 +173,19 @@ impl SettingsStore {
             .map_err(|error| format!("无法序列化设置：{error}"))?;
         let temporary = self.path.with_extension("json.tmp");
         fs::write(&temporary, json).map_err(|error| format!("无法写入设置：{error}"))?;
-        fs::rename(&temporary, &self.path).map_err(|error| format!("无法保存设置：{error}"))
+        // The file holds the API key, so keep it private to the current user.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&temporary, fs::Permissions::from_mode(0o600));
+        }
+        fs::rename(&temporary, &self.path).map_err(|error| format!("无法保存设置：{error}"))?;
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let _ = fs::set_permissions(&self.path, fs::Permissions::from_mode(0o600));
+        }
+        Ok(())
     }
 }
 
@@ -152,53 +194,6 @@ fn clamp(value: f64, minimum: f64, maximum: f64) -> f64 {
         value.clamp(minimum, maximum)
     } else {
         1.0
-    }
-}
-
-#[cfg(any(target_os = "macos", target_os = "windows"))]
-mod keychain {
-    const SERVICE: &str = "deepfish-desktop-pet";
-    const ACCOUNT: &str = "api-key";
-
-    fn entry() -> Result<keyring::Entry, String> {
-        keyring::Entry::new(SERVICE, ACCOUNT)
-            .map_err(|error| format!("无法访问系统钥匙串：{error}"))
-    }
-
-    pub fn read() -> Option<String> {
-        entry()
-            .ok()?
-            .get_password()
-            .ok()
-            .filter(|value| !value.is_empty())
-    }
-
-    pub fn write(key: &str) -> Result<(), String> {
-        entry()?
-            .set_password(key)
-            .map_err(|error| format!("无法保存 API Key：{error}"))
-    }
-
-    pub fn clear() -> Result<(), String> {
-        match entry()?.delete_credential() {
-            Ok(()) | Err(keyring::Error::NoEntry) => Ok(()),
-            Err(error) => Err(format!("无法清除 API Key：{error}")),
-        }
-    }
-}
-
-#[cfg(not(any(target_os = "macos", target_os = "windows")))]
-mod keychain {
-    pub fn read() -> Option<String> {
-        None
-    }
-
-    pub fn write(_key: &str) -> Result<(), String> {
-        Err("当前平台不支持系统钥匙串".to_string())
-    }
-
-    pub fn clear() -> Result<(), String> {
-        Ok(())
     }
 }
 
@@ -215,6 +210,82 @@ mod tests {
         assert!(settings.always_on_top && settings.free_walk && settings.interactive_zones);
         assert_eq!(settings.scale, 1.0);
         assert_eq!(settings.behavior_intensity, 1.0);
+    }
+
+    #[test]
+    fn keeps_the_api_key_out_of_public_settings() {
+        let dir = std::env::temp_dir().join(format!("deepfish-settings-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let mut store = SettingsStore::load(&dir);
+        let saved = store
+            .save(SettingsPatch {
+                api_key: Some("  sk-test  ".to_string()),
+                ..SettingsPatch::default()
+            })
+            .unwrap();
+        assert!(saved.has_api_key);
+        assert_eq!(store.api_key().as_deref(), Some("sk-test"));
+
+        let text = fs::read_to_string(dir.join("settings.json")).unwrap();
+        assert!(text.contains("sk-test"));
+        assert!(!serde_json::to_string(&saved).unwrap().contains("sk-test"));
+
+        let cleared = store
+            .save(SettingsPatch {
+                clear_api_key: Some(true),
+                ..SettingsPatch::default()
+            })
+            .unwrap();
+        assert!(!cleared.has_api_key);
+        assert!(store.api_key().is_none());
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            let mode = fs::metadata(dir.join("settings.json")).unwrap().permissions().mode();
+            assert_eq!(mode & 0o777, 0o600);
+        }
+        fs::remove_dir_all(dir).ok();
+    }
+
+    #[test]
+    fn keeps_agent_limits_within_range() {
+        let dir = std::env::temp_dir().join(format!("deepfish-limits-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        let mut store = SettingsStore::load(&dir);
+        assert_eq!(store.data.agent_loop_limit, DEFAULT_AGENT_LOOP_LIMIT);
+        assert_eq!(store.data.tool_call_limit, DEFAULT_TOOL_CALL_LIMIT);
+
+        let saved = store
+            .save(SettingsPatch {
+                agent_loop_limit: Some(0),
+                tool_call_limit: Some(0),
+                ..SettingsPatch::default()
+            })
+            .unwrap();
+        assert_eq!(saved.settings.agent_loop_limit, 1);
+        assert_eq!(saved.settings.tool_call_limit, 1);
+
+        let saved = store
+            .save(SettingsPatch {
+                agent_loop_limit: Some(9_999),
+                tool_call_limit: Some(9_999),
+                ..SettingsPatch::default()
+            })
+            .unwrap();
+        assert_eq!(saved.settings.agent_loop_limit, MAX_AGENT_LOOP_LIMIT);
+        assert_eq!(saved.settings.tool_call_limit, MAX_TOOL_CALL_LIMIT);
+
+        let saved = store
+            .save(SettingsPatch {
+                agent_loop_limit: Some(12),
+                tool_call_limit: Some(4),
+                ..SettingsPatch::default()
+            })
+            .unwrap();
+        assert_eq!(saved.settings.agent_loop_limit, 12);
+        assert_eq!(saved.settings.tool_call_limit, 4);
+        fs::remove_dir_all(dir).ok();
     }
 
     #[test]

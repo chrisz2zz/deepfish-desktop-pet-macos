@@ -13,6 +13,8 @@ const spicyLines = document.querySelector("#spicy-lines");
 const scale = document.querySelector("#scale");
 const scaleOutput = document.querySelector("#scale-output");
 const behaviorIntensity = document.querySelector("#behavior-intensity");
+const agentLoopLimit = document.querySelector("#agent-loop-limit");
+const toolCallLimit = document.querySelector("#tool-call-limit");
 const behaviorOutput = document.querySelector("#behavior-output");
 const status = document.querySelector("#status");
 const resetProvider = document.querySelector("#reset-provider");
@@ -64,11 +66,13 @@ form.addEventListener("submit", async (event) => {
       interactiveZones: interactiveZones.checked,
       spicyLines: spicyLines.checked,
       scale: Number(scale.value),
-      behaviorIntensity: Number(behaviorIntensity.value)
+      behaviorIntensity: Number(behaviorIntensity.value),
+      agentLoopLimit: Number(agentLoopLimit.value),
+      toolCallLimit: Number(toolCallLimit.value)
     });
     apiKey.value = "";
     clearKey.checked = false;
-    keyStatus.textContent = saved.hasApiKey ? "已加密保存" : "尚未保存 Key";
+    keyStatus.textContent = saved.hasApiKey ? "已保存在本机配置文件" : "尚未保存 Key";
     status.textContent = "设置已保存";
   } catch (error) {
     status.textContent = `保存失败：${error.message}`;
@@ -86,7 +90,9 @@ window.deepFish.getSettings().then((settings) => {
   spicyLines.checked = settings.spicyLines;
   scale.value = settings.scale;
   scaleOutput.value = `${Math.round(Number(settings.scale) * 100)}%`;
+  agentLoopLimit.value = settings.agentLoopLimit;
+  toolCallLimit.value = settings.toolCallLimit;
   behaviorIntensity.value = settings.behaviorIntensity;
   behaviorOutput.value = `${Math.round(Number(settings.behaviorIntensity) * 100)}%`;
-  keyStatus.textContent = settings.hasApiKey ? "已加密保存，留空即可保留" : "尚未保存 Key";
+  keyStatus.textContent = settings.hasApiKey ? "已保存在本机配置文件，留空即可保留" : "尚未保存 Key";
 });

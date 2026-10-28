@@ -11,21 +11,27 @@ pub const SMOKE_DIR_ENV: &str = "DEEPFISH_SMOKE_DIR";
 
 static COMPLETE: AtomicBool = AtomicBool::new(false);
 
-const PET_CHECK: &str = r##"window.__TAURI__.core.invoke("smoke_report", { stage: "pet", data: (() => {
+const PET_CHECK: &str = r##"(async () => {
+  // Give the preloaded frames a moment to land so the click-through mask is built.
+  await new Promise((resolve) => setTimeout(resolve, 900));
   const character = document.querySelector("#character");
   const stage = document.querySelector("#pet-stage");
   const root = document.querySelector("#pet-app");
   const frames = performance.getEntriesByType("resource").filter((entry) => entry.name.includes("/assets/frames/"));
-  return {
+  window.__TAURI__.core.invoke("smoke_report", { stage: "pet", data: {
     bridge: typeof window.deepFish?.walkStep === "function",
+    agent: typeof window.deepFish?.agent?.send === "function",
+    sessions: (await window.deepFish?.agent?.listSessions?.().catch(() => []))?.length ?? 0,
+    bubble: Boolean(document.querySelector("#chat-panel")?.classList.contains("chat-panel")),
+    hitMask: window.deepFishHitMask?.() ?? null,
     phase: document.querySelector("#phase-label")?.textContent ?? "",
     frame: character?.dataset.frame ?? null,
     frameLoaded: Boolean(character?.complete && character.naturalWidth > 0),
     stage: stage ? { width: stage.getBoundingClientRect().width, height: stage.getBoundingClientRect().height } : null,
-    scale: root?.style.transform ?? "",
+    scale: stage?.style.transform ?? "",
     frameResources: frames.length
-  };
-})() });"##;
+  } });
+})();"##;
 
 const SETTINGS_CHECK: &str = r##"(async () => {
   const saved = await window.__TAURI__.core.invoke("save_settings", { settings: { alwaysOnTop: true } });

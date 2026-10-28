@@ -41,7 +41,33 @@
     },
     getSettings: () => call("get_settings"),
     saveSettings: (settings) => call("save_settings", { settings }),
-    chat: (messages) => call("chat_send", { messages }),
+    // Agent harness: sessions, context compaction and the tool loop live in Rust.
+    agent: {
+      listSessions: () => call("agent_sessions"),
+      openSession: (sessionId) => call("agent_open_session", { sessionId: sessionId ?? null }),
+      newSession: (title) => call("agent_new_session", { title: title ?? null }),
+      renameSession: (sessionId, title) =>
+        call("agent_rename_session", { sessionId, title }),
+      deleteSession: (sessionId) => call("agent_delete_session", { sessionId }),
+      send: (sessionId, text, requestId) =>
+        call("agent_send", { sessionId, requestId, text }),
+      cancel: (sessionId) => call("agent_cancel", { sessionId }),
+      approve: (callId, allow) => call("agent_approval", { callId, allow }),
+      compact: (sessionId) => call("agent_compact", { sessionId }),
+      onEvent: (callback) => subscribe("agent-event", callback)
+    },
+    setHitMask: (mask) => {
+      call("set_hit_mask", {
+        cols: mask.cols,
+        rows: mask.rows,
+        cell: mask.cell,
+        bits: mask.bits
+      }).catch(() => {});
+    },
+    pinClickThrough: (pinned) => {
+      call("pin_click_through", { pinned }).catch(() => {});
+    },
+    onSpeak: (callback) => subscribe("pet-speak", callback),
     onWake: (callback) => subscribe("wake-event", callback),
     onCommand: (callback) => subscribe("pet-command", callback),
     onSettings: (callback) => subscribe("settings-updated", callback)

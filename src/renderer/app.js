@@ -10,7 +10,15 @@ const chatLog = document.querySelector("#chat-log");
 const chatForm = document.querySelector("#chat-form");
 const chatInput = document.querySelector("#chat-input");
 const chatClose = document.querySelector("#chat-close");
+const chatFab = document.querySelector("#chat-fab");
 const providerLabel = document.querySelector("#provider-label");
+const sessionButton = document.querySelector("#session-button");
+const sessionTitle = document.querySelector("#session-title");
+const sessionRunning = document.querySelector("#session-running");
+const sessionList = document.querySelector("#session-list");
+const sessionItems = document.querySelector("#session-items");
+const sessionNew = document.querySelector("#session-new");
+const sessionCompact = document.querySelector("#session-compact");
 
 const behaviorApi = window.DeepFishBehaviors;
 const gestureApi = window.DeepFishGestures;
@@ -35,7 +43,6 @@ const behaviorLabels = {
 };
 
 const clickLines = ["我有在认真营业。", "好的，用户又发癫了。", "你是不是想摸摸头？", "再点就要收费啦。"];
-const messages = [];
 let currentSettings = {
   provider: "pollinations",
   scale: 1,
@@ -56,10 +63,25 @@ let blinkTimer;
 let walkPending = false;
 let walkDirection = -1;
 let drag;
-let lastClickAt = 0;
 let lastHoverAt = 0;
 let lastZone = "";
 let tripCount = 0;
+let scrollPending = false;
+const sendButton = chatForm.querySelector("button");
+const agentApi = window.deepFish.agent;
+
+let activeSession = null;
+let sessionSummaries = [];
+let requestSequence = 0;
+let running = false;
+let pendingAssistant = null;
+let noticeTimer;
+/// Approval cards that are still waiting for the user, kept so reopening the
+/// panel re-renders them.
+const pendingApprovals = new Map();
+let armedRemoval = "";
+let armTimer = 0;
+let summaryExpanded = false;
 
 function randomOf(items) {
   return items[Math.floor(Math.random() * items.length)];
@@ -78,6 +100,189 @@ function setFrame(name) {
   const resolvedName = frameAliases[name] || name;
   character.src = framePath(resolvedName);
   character.dataset.frame = resolvedName;
+  scheduleHitMask();
+}
+
+// The window is a transparent rectangle, so the renderer reports which cells of
+// the sprite actually contain pixels and the backend makes the rest click-through.
+const HIT_CELL = 8;
+const hitCanvas = document.createElement("canvas");
+const hitContext = hitCanvas.getContext("2d", { willReadFrequently: true });
+const frameAlpha = new Map();
+const preparingAlpha = new Set();
+let hitBits = null;
+let hitCols = 0;
+let hitRows = 0;
+let hitUpdateHandle = 0;
+let hitTicker = 0;
+let hitTickerTimer = 0;
+let hitError = "";
+const alphaRetries = new Map();
+
+function scheduleHitMask() {
+  // A timer instead of an animation frame: frames are not delivered while the
+  // window is still hidden, which would leave the mask stuck on empty.
+  if (hitUpdateHandle) return;
+  hitUpdateHandle = setTimeout(() => {
+    hitUpdateHandle = 0;
+    pushHitMask();
+  }, 30);
+}
+
+function trackHitMaskWhileAnimating(duration) {
+  clearInterval(hitTicker);
+  clearTimeout(hitTickerTimer);
+  // Keyframe animations move the sprite, so the mask has to follow the frame.
+  hitTicker = setInterval(scheduleHitMask, 160);
+  hitTickerTimer = setTimeout(() => clearInterval(hitTicker), duration + 80);
+}
+
+// Sampling the alpha channel needs a decoded frame, and drawing an image that
+// is still decoding silently yields nothing, so maps are prepared off the frame.
+function alphaMap(name) {
+  const cached = frameAlpha.get(name);
+  if (cached) return cached;
+  prepareAlphaMap(name);
+  return null;
+}
+
+async function prepareAlphaMap(name) {
+  if (frameAlpha.has(name) || preparingAlpha.has(name)) return;
+  const image = frameImages.get(name);
+  if (!image) return;
+  preparingAlpha.add(name);
+  try {
+    await image.decode();
+    const width = Math.max(1, Math.round(image.naturalWidth / 2));
+    const height = Math.max(1, Math.round(image.naturalHeight / 2));
+    hitCanvas.width = width;
+    hitCanvas.height = height;
+    hitContext.clearRect(0, 0, width, height);
+    hitContext.drawImage(image, 0, 0, width, height);
+    const { data } = hitContext.getImageData(0, 0, width, height);
+    const alpha = new Uint8Array(width * height);
+    let max = 0;
+    for (let index = 0; index < alpha.length; index += 1) {
+      alpha[index] = data[index * 4 + 3];
+      if (alpha[index] > max) max = alpha[index];
+    }
+    if (max === 0) {
+      // A lazily decoded frame can still draw blank; retry a few times instead
+      // of caching an empty mask that would leave the pet unclickable.
+      const attempts = (alphaRetries.get(name) || 0) + 1;
+      alphaRetries.set(name, attempts);
+      if (attempts <= 3) setTimeout(scheduleHitMask, 350);
+      return;
+    }
+    alphaRetries.delete(name);
+    frameAlpha.set(name, { width, height, alpha });
+    scheduleHitMask();
+  } catch (error) {
+    hitError = `alpha ${name}: ${error?.message ?? error}`;
+  } finally {
+    preparingAlpha.delete(name);
+  }
+}
+
+function setHitBit(bits, index) {
+  bits[index >> 3] |= 1 << (index & 7);
+}
+
+function markHitRect(bits, rect) {
+  if (!rect || rect.width < 1 || rect.height < 1) return;
+  const firstCol = Math.max(0, Math.floor(rect.left / HIT_CELL));
+  const lastCol = Math.min(hitCols - 1, Math.ceil(rect.right / HIT_CELL) - 1);
+  const firstRow = Math.max(0, Math.floor(rect.top / HIT_CELL));
+  const lastRow = Math.min(hitRows - 1, Math.ceil(rect.bottom / HIT_CELL) - 1);
+  for (let row = firstRow; row <= lastRow; row += 1) {
+    for (let col = firstCol; col <= lastCol; col += 1) setHitBit(bits, row * hitCols + col);
+  }
+}
+
+function sampleAlpha(map, u, v) {
+  let max = 0;
+  for (let dy = -1; dy <= 1; dy += 1) {
+    const y = v + dy;
+    if (y < 0 || y >= map.height) continue;
+    for (let dx = -1; dx <= 1; dx += 1) {
+      const x = u + dx;
+      if (x < 0 || x >= map.width) continue;
+      if (map.alpha[y * map.width + x] > max) max = map.alpha[y * map.width + x];
+    }
+  }
+  return max;
+}
+
+function interactiveRects() {
+  const rects = [];
+  if (!chatPanel.hidden) {
+    rects.push(chatPanel.getBoundingClientRect());
+    if (!sessionList.hidden) rects.push(sessionList.getBoundingClientRect());
+  } else if (appRoot.matches(":hover")) {
+    rects.push(chatFab.getBoundingClientRect());
+  }
+  if (speech.classList.contains("visible")) rects.push(speech.getBoundingClientRect());
+  return rects;
+}
+
+function buildHitBits() {
+  hitCols = Math.max(1, Math.ceil(window.innerWidth / HIT_CELL));
+  hitRows = Math.max(1, Math.ceil(window.innerHeight / HIT_CELL));
+  const bits = new Uint8Array(Math.ceil((hitCols * hitRows) / 8));
+  const frameName = character.dataset.frame || restingFrame();
+  const map = alphaMap(frameName);
+  const rect = character.getBoundingClientRect();
+  if (map && rect.width > 0 && rect.height > 0) {
+    const firstCol = Math.max(0, Math.floor(rect.left / HIT_CELL));
+    const lastCol = Math.min(hitCols - 1, Math.ceil(rect.right / HIT_CELL) - 1);
+    const firstRow = Math.max(0, Math.floor(rect.top / HIT_CELL));
+    const lastRow = Math.min(hitRows - 1, Math.ceil(rect.bottom / HIT_CELL) - 1);
+    for (let row = firstRow; row <= lastRow; row += 1) {
+      const v = Math.floor((((row + 0.5) * HIT_CELL - rect.top) / rect.height) * map.height);
+      if (v < 0 || v >= map.height) continue;
+      for (let col = firstCol; col <= lastCol; col += 1) {
+        const u = Math.floor((((col + 0.5) * HIT_CELL - rect.left) / rect.width) * map.width);
+        if (u < 0 || u >= map.width) continue;
+        if (sampleAlpha(map, u, v) > 40) setHitBit(bits, row * hitCols + col);
+      }
+    }
+  }
+  for (const target of interactiveRects()) markHitRect(bits, target);
+  return bits;
+}
+
+function hitMaskSnapshot() {
+  let active = 0;
+  if (hitBits) {
+    for (const byte of hitBits) {
+      for (let bit = 0; bit < 8; bit += 1) if (byte & (1 << bit)) active += 1;
+    }
+  }
+  return { cols: hitCols, rows: hitRows, active, frames: frameAlpha.size, error: hitError };
+}
+
+function pushHitMask() {
+  if (!window.deepFish.setHitMask) return;
+  let bits;
+  try {
+    bits = buildHitBits();
+    hitError = "";
+  } catch (error) {
+    hitError = String(error?.message ?? error);
+    return;
+  }
+  if (hitBits && hitBits.length === bits.length) {
+    let unchanged = true;
+    for (let index = 0; index < bits.length; index += 1) {
+      if (bits[index] !== hitBits[index]) {
+        unchanged = false;
+        break;
+      }
+    }
+    if (unchanged) return;
+  }
+  hitBits = bits;
+  window.deepFish.setHitMask({ cols: hitCols, rows: hitRows, cell: HIT_CELL, bits: Array.from(bits) });
 }
 
 function stopFramePlayback(reset = true) {
@@ -120,9 +325,11 @@ function playBehaviorFrames(name, duration) {
   frameTimer = setTimeout(() => stopFramePlayback(), duration);
 }
 
+const frameImages = new Map();
 for (const name of frameNames) {
   const image = new Image();
   image.src = framePath(name);
+  frameImages.set(name, image);
 }
 
 function removePrefixedClass(prefix) {
@@ -132,11 +339,47 @@ function removePrefixedClass(prefix) {
 }
 
 function say(text, label, duration = 4200) {
+  // The chat bubble already lives directly above the pet, so speaking there
+  // would overlap it; a notification card is more important than small talk.
+  if (!chatPanel.hidden || speech.classList.contains("notice")) return;
   phaseLabel.textContent = label || window.DeepFishClock.getPhase().label;
   speechText.textContent = behaviorApi.stripHints(text);
   speech.classList.add("visible");
+  scheduleHitMask();
   clearTimeout(speechTimer);
-  speechTimer = setTimeout(() => speech.classList.remove("visible"), duration);
+  speechTimer = setTimeout(() => {
+    speech.classList.remove("visible");
+    scheduleHitMask();
+  }, duration);
+}
+
+const NOTICE_TITLES = { approval: "🔐 需要审批", done: "✅ 任务完成", error: "⚠ 任务失败" };
+
+/// A background-task notification. Visually distinct from the chat bubbles and
+/// the idle speech bubble: dark card, no tail, clickable, one line of text.
+function notify(kind, message, options = {}) {
+  clearTimeout(speechTimer);
+  clearTimeout(noticeTimer);
+  speech.classList.remove("visible", "notice", "notice-approval", "notice-done", "notice-error");
+  speech.classList.add("notice", `notice-${kind}`);
+  phaseLabel.textContent = NOTICE_TITLES[kind] || "";
+  speechText.textContent = message;
+  speech.dataset.sessionId = options.sessionId || "";
+  speech.title = "点击查看会话";
+  void speech.offsetWidth;
+  speech.classList.add("visible");
+  scheduleHitMask();
+  const duration = options.duration ?? (kind === "approval" ? 0 : 7000);
+  if (duration > 0) noticeTimer = setTimeout(hideNotice, duration);
+}
+
+function hideNotice() {
+  if (!speech.classList.contains("notice")) return;
+  clearTimeout(noticeTimer);
+  noticeTimer = undefined;
+  speech.classList.remove("visible", "notice", "notice-approval", "notice-done", "notice-error");
+  speech.removeAttribute("title");
+  scheduleHitMask();
 }
 
 function setScene(scene) {
@@ -155,6 +398,7 @@ function animate(action, duration = 1200) {
   appRoot.classList.add(`action-${action}`);
   clearTimeout(actionTimer);
   actionTimer = setTimeout(() => appRoot.classList.remove(`action-${action}`), duration);
+  trackHitMaskWhileAnimating(duration);
 }
 
 function particles(icon, count = 5) {
@@ -313,60 +557,451 @@ function reactToWalkHover(event) {
   }
 }
 
-function openChat() {
+async function openChat() {
+  if (!chatPanel.hidden) return;
   stopWalk();
   chatPanel.hidden = false;
   stopFramePlayback();
+  hideNotice();
   speech.classList.remove("visible");
+  scheduleHitMask();
   chatInput.focus();
+  // Re-read the session so replies that arrived while the panel was closed show up.
+  if (!running) await loadSession(activeSession?.id);
 }
 
 function closeChat() {
+  // Runs keep going in the background; only the panel is hidden.
   chatPanel.hidden = true;
+  hideSessionList();
   stopFramePlayback();
+  scheduleHitMask();
   stage.focus();
   scheduleIdle();
 }
 
-function appendMessage(role, content, extraClass = "") {
+function scrollChat() {
+  if (scrollPending) return;
+  scrollPending = true;
+  requestAnimationFrame(() => {
+    scrollPending = false;
+    chatLog.scrollTop = chatLog.scrollHeight;
+  });
+}
+
+function messageNode(message) {
   const node = document.createElement("p");
-  node.className = `message ${role} ${extraClass}`.trim();
-  node.textContent = content;
-  chatLog.append(node);
-  chatLog.scrollTop = chatLog.scrollHeight;
+  if (message.role === "tool") {
+    node.className = "tool-chip";
+    node.textContent = message.display || message.name || "工具";
+    return node;
+  }
+  if (!message.content) return null;
+  node.className = `message ${message.role}`;
+  node.textContent = message.content;
   return node;
 }
 
-function reactToUserText(content) {
-  if (/生气|怒|气死|操|发火/.test(content)) runBehavior("angry", { say: false });
-  else if (/性能|测试|压测/.test(content)) runBehavior("panic", { say: false });
-  else if (/贵|价格|涨价/.test(content)) runBehavior("price", { say: false });
-  else if (/Gemini|ChatGPT|Grok|GLM|Claude/i.test(content)) runBehavior("rival", { say: false });
-  else if (content.length > 260) runBehavior("work", { say: false });
-  else runBehavior("think", { say: false });
+function appendNode(node) {
+  if (!node) return null;
+  chatLog.append(node);
+  scrollChat();
+  return node;
+}
+
+function appendNote(text, extraClass = "") {
+  return appendNode(noteNode(text, extraClass));
+}
+
+function noteNode(text, extraClass = "") {
+  const node = document.createElement("p");
+  node.className = `note ${extraClass}`.trim();
+  node.textContent = text;
+  if (extraClass === "summary") {
+    node.title = "点击查看摘要";
+    node.addEventListener("click", () => {
+      summaryExpanded = !summaryExpanded;
+      renderSession(activeSession);
+    });
+  }
+  return node;
+}
+
+function approvalNode(event) {
+  const node = document.createElement("div");
+  node.className = `approval risk-${event.risk || "approval"}`;
+  node.dataset.callId = event.callId;
+
+  const text = document.createElement("p");
+  text.className = "approval-text";
+  text.textContent = event.summary || event.display || event.tool;
+
+  const actions = document.createElement("div");
+  actions.className = "approval-actions";
+  const allow = document.createElement("button");
+  allow.type = "button";
+  allow.className = "approve";
+  allow.textContent = "允许";
+  const deny = document.createElement("button");
+  deny.type = "button";
+  deny.className = "deny";
+  deny.textContent = "拒绝";
+  actions.append(allow, deny);
+  node.append(text, actions);
+
+  let settled = false;
+  const finish = (allowed) => {
+    if (settled) return;
+    settled = true;
+    pendingApprovals.delete(event.callId);
+    allow.disabled = true;
+    deny.disabled = true;
+    actions.remove();
+    const verdict = document.createElement("span");
+    verdict.className = allowed ? "approval-done" : "approval-denied";
+    verdict.textContent = allowed ? "已允许" : "已拒绝";
+    node.append(verdict);
+  };
+  allow.addEventListener("click", () => {
+    finish(true);
+    agentApi.approve(event.callId, true).catch(() => {});
+  });
+  deny.addEventListener("click", () => {
+    finish(false);
+    agentApi.approve(event.callId, false).catch(() => {});
+  });
+
+  if (event.timeout) {
+    const timer = document.createElement("span");
+    timer.className = "approval-hint";
+    timer.textContent = `${Math.round(event.timeout)}s 后自动拒绝`;
+    node.append(timer);
+    setTimeout(() => {
+      if (settled) return;
+      finish(false);
+      agentApi.approve(event.callId, false).catch(() => {});
+    }, Math.round(event.timeout) * 1000);
+  }
+  return node;
+}
+
+function revealApproval(event) {
+  if (event.risk === "blocked") {
+    pendingApprovals.delete(event.callId);
+    if (!chatPanel.hidden && activeSession && activeSession.id === event.sessionId) {
+      appendNote(`⛔ ${event.summary}`, "warn");
+    }
+    return;
+  }
+  const watching = !chatPanel.hidden && activeSession && activeSession.id === event.sessionId;
+  if (!watching) {
+    // Keep the panel closed: the pet just raises its head and asks. Clicking the
+    // notice opens the chat with the approval card already on screen.
+    notify("approval", "主人，有一个操作需要审批", {
+      sessionId: event.sessionId,
+      duration: ((event.timeout ?? 300) + 1) * 1000
+    });
+    return;
+  }
+  showApproval(event);
+}
+
+function settleApproval(event) {
+  pendingApprovals.delete(event.callId);
+  if (speech.classList.contains("notice-approval") && !pendingApprovals.size) hideNotice();
+  const card = chatLog.querySelector(`.approval[data-call-id="${event.callId}"]`);
+  if (!card || event.decision === "done") return;
+  card.querySelector(".approval-actions")?.remove();
+  if (card.querySelector(".approval-denied") || card.querySelector(".approval-done")) return;
+  const verdict = document.createElement("span");
+  verdict.className = "approval-denied";
+  verdict.textContent = event.decision === "blocked" ? "已阻止" : "已拒绝";
+  card.append(verdict);
+}
+
+function showApproval(event) {
+  pendingApprovals.set(event.callId, event);
+  chatLog.querySelector(`.approval[data-call-id="${event.callId}"]`)?.remove();
+  appendNode(approvalNode(event));
+}
+
+function renderSession(session) {
+  if (!session) return;
+  activeSession = session;
+  pendingAssistant = null;
+  chatLog.textContent = "";
+  sessionTitle.textContent = session.title;
+  document.title = `大肥鱼 · ${session.title}`;
+  if (session.summary) {
+    const count = session.compacted || 0;
+    appendNode(noteNode(`📦 更早的 ${count} 条对话已压缩为摘要${summaryExpanded ? "（点击收起）" : "（点击展开）"}`, "summary"));
+    if (summaryExpanded) appendNode(noteNode(session.summary));
+  }
+  for (const message of session.messages) {
+    const node = messageNode(message);
+    if (node) chatLog.append(node);
+  }
+  if (!chatLog.childElementCount) chatLog.append(noteNode("新对话已就绪，说点什么吧。", "hint"));
+  for (const pending of pendingApprovals.values()) {
+    if (pending.sessionId === session.id) chatLog.append(approvalNode(pending));
+  }
+  scrollChat();
+}
+
+function renderSessionList() {
+  sessionItems.textContent = "";
+  if (!sessionSummaries.length) {
+    sessionItems.append(noteNode("还没有会话"));
+    return;
+  }
+  for (const summary of sessionSummaries) {
+    const item = document.createElement("div");
+    item.className = "session-item" + (activeSession && summary.id === activeSession.id ? " active" : "");
+
+    const open = document.createElement("button");
+    open.type = "button";
+    open.className = "title";
+    open.textContent = summary.title;
+    open.title = summary.preview || summary.title;
+    open.addEventListener("click", () => selectSession(summary.id));
+
+    const time = document.createElement("span");
+    time.className = "time";
+    time.textContent = relativeTime(summary.updatedAt);
+
+    const remove = document.createElement("button");
+    remove.type = "button";
+    remove.className = "remove" + (armedRemoval === summary.id ? " arming" : "");
+    remove.textContent = armedRemoval === summary.id ? "删除?" : "×";
+    remove.title = "删除会话";
+    remove.addEventListener("click", (event) => {
+      event.stopPropagation();
+      armRemoval(summary.id);
+    });
+
+    item.append(open, time, remove);
+    sessionItems.append(item);
+  }
+}
+
+function relativeTime(timestamp) {
+  const minutes = Math.max(0, Math.round((Date.now() - Number(timestamp || 0)) / 60000));
+  if (minutes < 1) return "刚刚";
+  if (minutes < 60) return `${minutes} 分钟前`;
+  const hours = Math.round(minutes / 60);
+  if (hours < 24) return `${hours} 小时前`;
+  return `${Math.round(hours / 24)} 天前`;
+}
+
+function armRemoval(id) {
+  if (armedRemoval === id) {
+    armedRemoval = "";
+    clearTimeout(armTimer);
+    void removeSession(id);
+    return;
+  }
+  armedRemoval = id;
+  renderSessionList();
+  clearTimeout(armTimer);
+  armTimer = setTimeout(() => {
+    armedRemoval = "";
+    renderSessionList();
+  }, 2500);
+}
+
+async function removeSession(id) {
+  try {
+    sessionSummaries = await agentApi.deleteSession(id);
+    if (activeSession && activeSession.id === id) {
+      activeSession = null;
+      await loadSession();
+      return;
+    }
+    renderSessionList();
+  } catch (error) {
+    appendNote(`删除失败：${error.message}`, "warn");
+  }
+}
+
+function toggleSessionList() {
+  const show = sessionList.hidden;
+  sessionList.hidden = !show;
+  sessionButton.setAttribute("aria-expanded", String(show));
+  if (show) renderSessionList();
+}
+
+function hideSessionList() {
+  sessionList.hidden = true;
+  sessionButton.setAttribute("aria-expanded", "false");
+}
+
+async function refreshSessions() {
+  try {
+    sessionSummaries = await agentApi.listSessions();
+  } catch {
+    sessionSummaries = [];
+    if (!sessionList.hidden) {
+      sessionItems.textContent = "";
+      sessionItems.append(noteNode("会话列表加载失败，稍后再试。"));
+    }
+    return;
+  }
+  if (!sessionList.hidden) renderSessionList();
+}
+
+async function loadSession(sessionId) {
+  try {
+    const session = await agentApi.openSession(sessionId);
+    summaryExpanded = false;
+    renderSession(session);
+    await refreshSessions();
+  } catch (error) {
+    chatLog.textContent = "";
+    appendNote(`会话加载失败：${error.message}`, "warn");
+  }
+}
+
+async function selectSession(id) {
+  hideSessionList();
+  if (activeSession && activeSession.id === id) return;
+  await loadSession(id);
+}
+
+async function createSession() {
+  hideSessionList();
+  try {
+    const session = await agentApi.newSession();
+    summaryExpanded = false;
+    renderSession(session);
+    await refreshSessions();
+    chatInput.focus();
+  } catch (error) {
+    appendNote(`新建会话失败：${error.message}`, "warn");
+  }
+}
+
+function setRunning(value) {
+  running = value;
+  sessionRunning.hidden = !value;
+  chatInput.placeholder = value ? "正在处理…" : "问大肥鱼...";
+}
+
+function handleAgentEvent(event) {
+  if (!event) return;
+  // Approval cards matter even when another session (or none) is on screen:
+  // the run is parked until the user answers.
+  if (event.type === "approval") {
+    pendingApprovals.set(event.callId, event);
+    void revealApproval(event);
+    return;
+  }
+  if (event.type === "run-end") {
+    // The renderer is the only place that knows whether the user is watching,
+    // so background runs announce themselves here instead of in Rust.
+    if (event.outcome !== "cancelled") {
+      const watching =
+        !chatPanel.hidden && activeSession && activeSession.id === event.sessionId;
+      if (!watching) {
+        notify(event.outcome === "ok" ? "done" : "error", event.outcome === "ok" ? "主人，任务完成了" : "主人，任务失败了", {
+          sessionId: event.sessionId
+        });
+      }
+    }
+    void refreshSessions();
+    return;
+  }
+  if (event.type === "approval-result") {
+    settleApproval(event);
+    return;
+  }
+  if (!activeSession || event.sessionId !== activeSession.id) {
+    if (event.type === "message") void refreshSessions();
+    return;
+  }
+  switch (event.type) {
+    case "message": {
+      const message = event.message;
+      if (message.role === "assistant" && pendingAssistant) {
+        pendingAssistant.classList.remove("streaming");
+        if (message.content) pendingAssistant.textContent = message.content;
+        pendingAssistant = null;
+        scrollChat();
+      } else {
+        const node = messageNode(message);
+        if (node) appendNode(node);
+      }
+      activeSession.messages.push(message);
+      if (message.role === "user") void refreshSessions();
+      break;
+    }
+    case "delta": {
+      if (!pendingAssistant) {
+        // `messageNode` drops empty messages, so the streaming placeholder is
+        // built here instead of going through it.
+        pendingAssistant = document.createElement("p");
+        pendingAssistant.className = "message assistant streaming";
+        appendNode(pendingAssistant);
+      }
+      pendingAssistant.textContent += event.text ?? "";
+      scrollChat();
+      break;
+    }
+    case "status":
+      if (event.state === "idle") {
+        setRunning(false);
+        if (pendingAssistant) {
+          pendingAssistant.classList.remove("streaming");
+          pendingAssistant = null;
+        }
+      } else {
+        setRunning(true);
+      }
+      break;
+    case "error":
+      setRunning(false);
+      appendNote(event.message, "warn");
+      break;
+    case "note":
+      appendNote(event.text, event.level === "warn" ? "warn" : "");
+      break;
+    case "renamed":
+      if (activeSession) {
+        activeSession.title = event.title;
+        sessionTitle.textContent = event.title;
+      }
+      void refreshSessions();
+      break;
+    case "compacted":
+      if (activeSession) {
+        activeSession.compacted = event.compacted;
+        activeSession.summary = event.summary;
+        summaryExpanded = false;
+        renderSession(activeSession);
+      }
+      break;
+    default:
+      break;
+  }
 }
 
 async function sendChat(event) {
   event.preventDefault();
   const content = chatInput.value.trim();
   if (!content) return;
+  if (!activeSession) await loadSession();
+  if (!activeSession) return;
+
   chatInput.value = "";
-  messages.push({ role: "user", content });
-  appendMessage("user", content);
-  reactToUserText(content);
-  const button = chatForm.querySelector("button");
-  button.disabled = true;
-  const pending = appendMessage("assistant", "正在想...");
+  hideSessionList();
+  runBehavior("think", { say: false });
+  pendingAssistant = null;
+  setRunning(true);
+  requestSequence += 1;
   try {
-    const reply = await window.deepFish.chat(messages);
-    pending.textContent = reply;
-    messages.push({ role: "assistant", content: reply });
+    await agentApi.send(activeSession.id, content, requestSequence);
   } catch (error) {
-    pending.textContent = `没连上模型：${error.message}`;
-    pending.classList.add("error");
-  } finally {
-    button.disabled = false;
-    chatInput.focus();
+    setRunning(false);
+    appendNote(`没连上模型：${error.message}`, "warn");
   }
 }
 
@@ -378,9 +1013,10 @@ stage.addEventListener("pointerenter", () => {
 stage.addEventListener("pointerleave", () => { lastZone = ""; });
 
 stage.addEventListener("pointerdown", (event) => {
-  if (event.button !== 0) return;
+  if (event.button !== 0 || event.target === chatFab) return;
   stopWalk();
   stopFramePlayback();
+  window.deepFish.pinClickThrough(true);
   stage.setPointerCapture(event.pointerId);
   drag = {
     x: event.screenX,
@@ -407,10 +1043,12 @@ stage.addEventListener("pointermove", (event) => {
 });
 
 stage.addEventListener("pointerup", (event) => {
-  if (event.button !== 0) return;
+  if (event.button !== 0 || event.target === chatFab) return;
+  if (!drag) return;
   const completedDrag = drag;
   const moved = completedDrag?.total || 0;
   drag = undefined;
+  window.deepFish.pinClickThrough(false);
   if (completedDrag?.spin?.dizzy) {
     runBehavior("dizzy");
     return;
@@ -419,15 +1057,36 @@ stage.addEventListener("pointerup", (event) => {
     runBehavior("startle", { label: "拖拽反馈" });
     return;
   }
-  const now = Date.now();
-  if (now - lastClickAt < 320) {
-    openChat();
-    lastClickAt = 0;
-  } else {
-    lastClickAt = now;
-    runBehavior("pat", { say: false });
-    say(randomOf(clickLines), "点击反馈", 2400);
+  runBehavior("pat", { say: false });
+  say(randomOf(clickLines), "点击反馈", 2400);
+});
+
+speech.addEventListener("click", async () => {
+  if (!speech.classList.contains("notice")) return;
+  const sessionId = speech.dataset.sessionId;
+  hideNotice();
+  await openChat();
+  if (sessionId && (!activeSession || activeSession.id !== sessionId)) {
+    await loadSession(sessionId);
   }
+});
+
+chatFab.addEventListener("click", (event) => {
+  event.stopPropagation();
+  openChat();
+});
+
+for (const name of ["pointerenter", "pointerleave"]) {
+  appRoot.addEventListener(name, () => scheduleHitMask());
+}
+
+stage.addEventListener("pointercancel", () => {
+  drag = undefined;
+  window.deepFish.pinClickThrough(false);
+});
+
+stage.addEventListener("lostpointercapture", () => {
+  if (!drag) window.deepFish.pinClickThrough(false);
 });
 
 stage.addEventListener("keydown", (event) => {
@@ -445,6 +1104,22 @@ document.addEventListener("contextmenu", (event) => {
 
 chatClose.addEventListener("click", closeChat);
 chatForm.addEventListener("submit", sendChat);
+sessionButton.addEventListener("click", toggleSessionList);
+sessionNew.addEventListener("click", createSession);
+sessionCompact.addEventListener("click", async () => {
+  if (!activeSession) return;
+  hideSessionList();
+  try {
+    const changed = await agentApi.compact(activeSession.id);
+    if (!changed) appendNote("当前上下文还很短，暂时不需要压缩");
+  } catch (error) {
+    appendNote(`压缩失败：${error.message}`, "warn");
+  }
+});
+agentApi.onEvent(handleAgentEvent);
+chatLog.addEventListener("pointerdown", hideSessionList);
+chatForm.addEventListener("pointerdown", hideSessionList);
+void refreshSessions();
 
 window.deepFish.onWake(({ action, awayMs }) => {
   runBehavior(action);
@@ -456,11 +1131,21 @@ window.deepFish.onCommand((command) => {
   else runBehavior(command);
 });
 
+// The model can ask the pet to speak through the `pet_say` tool.
+window.deepFish.onSpeak(({ text }) => {
+  if (text) say(text, "大肥鱼", Math.min(6000, 1600 + text.length * 110));
+});
+
 function applySettings(settings) {
   currentSettings = { ...currentSettings, ...settings };
-  appRoot.style.transform = `scale(${currentSettings.scale || 1})`;
+  // Only the pet scales, and the row below the bubbles follows its real height
+  // so the bubbles stay attached to the head at every zoom level.
+  const scale = Number(currentSettings.scale) || 1;
+  stage.style.transform = `scale(${scale})`;
+  appRoot.style.setProperty("--pet-height", `${Math.round(stage.offsetHeight * scale)}px`);
   providerLabel.textContent = currentSettings.provider === "deepseek" ? "DeepSeek" : currentSettings.provider === "custom" ? "自定义模型" : "免费模型";
   if (currentSettings.freeWalk === false) stopWalk();
+  scheduleHitMask();
   scheduleIdle();
 }
 
@@ -469,6 +1154,10 @@ window.deepFish.getSettings().then(applySettings);
 applyClock();
 setInterval(applyClock, 60000);
 scheduleIdle();
+window.addEventListener("resize", scheduleHitMask);
+// Read-only snapshot consumed by the packaged smoke test.
+window.deepFishHitMask = hitMaskSnapshot;
+scheduleHitMask();
 
 function scheduleBlink() {
   clearTimeout(blinkTimer);

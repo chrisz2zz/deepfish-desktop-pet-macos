@@ -15,16 +15,24 @@
       </section>
 
       <section id="chat-panel" class="chat-panel" aria-label="聊天窗口" hidden>
-        <header class="chat-header">
-          <div>
-            <strong>大肥鱼</strong>
-            <span id="provider-label">免费模型</span>
-          </div>
+        <div class="chat-bar">
+          <button id="session-button" class="chat-session" type="button" title="切换会话" aria-expanded="false">
+            <span id="session-title">新对话</span>
+            <span class="chat-caret" aria-hidden="true">▾</span>
+            <span id="session-running" class="chat-running" aria-label="处理中" hidden></span>
+          </button>
+          <button id="session-new" class="icon-button" type="button" title="新建会话" aria-label="新建会话">＋</button>
+          <button id="session-compact" class="icon-button" type="button" title="压缩上下文" aria-label="压缩上下文">⤓</button>
           <button id="chat-close" class="icon-button" type="button" title="关闭聊天" aria-label="关闭聊天">×</button>
-        </header>
-        <div id="chat-log" class="chat-log" aria-live="polite">
-          <p class="message assistant">我在呢。想聊什么？</p>
         </div>
+        <div id="session-list" class="session-list" hidden>
+          <div class="session-list-head">
+            <span>会话</span>
+            <span id="provider-label" class="chat-provider">免费模型</span>
+          </div>
+          <div id="session-items" class="session-items"></div>
+        </div>
+        <div id="chat-log" class="chat-log" aria-live="polite"></div>
         <form id="chat-form" class="chat-form">
           <input id="chat-input" maxlength="600" autocomplete="off" placeholder="问大肥鱼..." aria-label="聊天内容">
           <button type="submit" title="发送" aria-label="发送">↑</button>
@@ -32,9 +40,9 @@
       </section>
 
       <div id="effect-layer" class="effect-layer" aria-hidden="true"></div>
-      <div id="pet-stage" class="pet-stage" tabindex="0" role="button" aria-label="拖动、点击或双击大肥鱼">
+      <div id="pet-stage" class="pet-stage" tabindex="0" role="button" aria-label="拖动或点击大肥鱼，按回车打开聊天">
         <div class="floor-shadow"></div>
-        <img id="character" class="character" src="../../assets/frames/frame-neutral.png" alt="蓝色大肥鱼桌宠">
+        <img id="character" class="character" src="../../assets/frames/frame-neutral.png" alt="蓝色大肥鱼桌宠" draggable="false">
         <div id="expression-layer" class="expression-layer" aria-hidden="true">
           <span class="eye eye-left"></span>
           <span class="eye eye-right"></span>
@@ -59,8 +67,9 @@
         </div>
         <div id="sleep-mark" class="sleep-mark" aria-hidden="true">Z</div>
         <div id="mood" class="mood" aria-hidden="true">♡</div>
+        <button id="chat-fab" class="chat-fab" type="button" title="和大肥鱼聊天" aria-label="和大肥鱼聊天">💬</button>
       </div>
-      <p class="hint">双击聊天 · 右键菜单</p>
+      <p class="hint">点 💬 聊天 · 右键菜单</p>
     </main>
     <script src="../shared/desktop-bridge.js"></script>
     <script src="../shared/circadian.js"></script>
