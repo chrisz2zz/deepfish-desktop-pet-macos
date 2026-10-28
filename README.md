@@ -32,6 +32,8 @@
 - Rust stable：<https://rustup.rs>
 - Node.js 20 或更高版本（`npm test` 使用内置的 `node --test`）
 
+以上仅针对 macOS；在 Windows / Linux 上构建的可行性分析、打包命令与未验证风险见 [Windows / Linux 可行性与打包](#windows--linux-可行性与打包)。
+
 ## 快速开始
 
 ```bash
@@ -107,6 +109,77 @@ Rust 侧在 `Cargo.toml` 的 `[lints.clippy]` 里开了 pedantic（放开了数�
 npm run web:prepare
 cargo test --manifest-path src-tauri/Cargo.toml -- --ignored
 ```
+
+## Windows / Linux 可行性与打包
+
+> ⚠️ **本项目只在 macOS 上开发和验证过。Windows 与 Linux 版本没有在真实设备上运行验证过**，下面是根据代码判断的迁移可行性，不保证开箱即用。实际效果很可能需要针对性修改，欢迎在对应平台上测试并提 PR。
+
+### 代码层面现状
+
+| 能力 | Windows | Linux | 说明 |
+| --- | --- | --- | --- |
+| 构建（Tauri 2 + Rust + 原生 HTML/JS） | 可行 | 可行 | 前端没有 macOS 专属代码；`objc2-app-kit` 依赖只在 `[target.'cfg(target_os = "macos")']` 下编译 |
+| 透明、无边框、置顶、隐藏任务栏 | 大概率可行 | 取决于合成器 | 窗口已是 `transparent + decorations:false`；Linux 需要合成器（X11 + picom / KWin 等），Wayland 下透明与穿透行为不可控 |
+| 按立绘轮廓穿透点击 | **未实现** | **未实现** | 光标查询只有 macOS 实现（`NSEvent.mouseLocation`），其它平台 `cursor_points()` 返回 `None`，整窗保持可点击——透明区域会挡住后面的窗口。移植思路：Windows 用 `GetCursorPos` + `WS_EX_TRANSPARENT`/`SetWindowRgn`，Linux X11 用 `XQueryPointer` + shape 扩展（Wayland 无对应能力） |
+| 拖动、自动散步、跨屏夹取 | 可行 | 可行 | 只用 `outer_position` / `set_position` / `available_monitors` |
+| 菜单栏 / 托盘图标 | 可行 | 依赖 libayatana-appindicator | 托盘图标用 `icons/tray.png`；GNOME 需要装 AppIndicator 扩展才显示 |
+| 休眠恢复检测 | 可行 | 可行 | 纯 `SystemTime` 时间差，无平台 API |
+| 设置与会话存储 | 可行 | 可行 | 路径来自 `app_config_dir()`（Windows 在 `%APPDATA%\com.deepfish.desktop-pet`，Linux 在 `~/.config/com.deepfish.desktop-pet`）；`0600` 权限只在 unix 生效，Windows 依赖用户目录 ACL |
+| 命令工具 `run_command` | **需要改代码** | 可行 | 现在固定用 `sh -c`，Windows 要改成 `cmd /c` 或 PowerShell；风险白名单（`ls`/`cat`/`grep`/`git status`）也是 POSIX 命令，Windows 原生没有 |
+| `Accessory` 激活策略 | 不需要 | 不需要 | 已用 `#[cfg(target_os = "macos")]` 隔离 |
+
+### 打包方式
+
+Tauri **不支持交叉编译安装包**，需要在目标系统上各构建一次（或在 CI 里跑矩阵）。两个平台都需要先把 `src-tauri/tauri.conf.json` 里的 `bundle.targets` 从当前的 `["app", "dmg"]` 改成目标格式。
+
+**Windows**
+
+```bash
+# 依赖：Rust MSVC 工具链、Visual Studio Build Tools（C++ 桌面开发）、WebView2 Runtime（Win10 1803+ 通常自带）
+# bundle.targets 改成 ["nsis"]（msi 需要额外装 WiX）
+npm install
+npx tauri build --bundles nsis
+# 产物：src-tauri/target/release/bundle/nsis/*-setup.exe（msi 在 bundle/msi/）
+```
+
+**Linux（Debian / Ubuntu）**
+
+```bash
+sudo apt update && sudo apt install -y libwebkit2gtk-4.1-dev build-essential curl wget file \
+  libxdo-dev libssl-dev libayatana-appindicator3-dev librsvg2-dev
+# bundle.targets 改成 ["deb", "appimage"]
+npm install
+npx tauri build --bundles deb,appimage
+# 产物：bundle/deb/*.deb 与 bundle/appimage/*.AppImage（AppImage 运行需要 libfuse2）
+```
+
+**用 CI 出三平台产物**（没有设备时最省事，但仍属于未人工验证的构建）：
+
+```yaml
+# .github/workflows/bundle.yml（示意，需自行调整权限与产物上传）
+jobs:
+  bundle:
+    strategy:
+      matrix:
+        platform: [macos-latest, ubuntu-22.04, windows-latest]
+    runs-on: ${{ matrix.platform }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with: { node-version: 20 }
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: tauri-apps/tauri-action@v0
+        with: { projectPath: "src-tauri" }
+```
+
+### 未验证的风险点
+
+- 透明窗口在 Windows 上可能出现过黑/整窗不透明（需要无边框 + DWM 合成），Linux 无合成器时干脆不透明。
+- 穿透点击在非 macOS 上不生效，桌宠的透明区域会挡住后面窗口的点击。
+- 高 DPI 缩放（150% / 200%）下气泡位置与 `--pet-height` 计算没有校准，可能偏移。
+- 中文字体回退（缺 `PingFang SC` / 微软雅黑时）可能影响气泡排版。
+- 命令工具与风险分级按 POSIX 假设编写，Windows 上要适配。
+- 托盘图标在部分桌面环境（尤其 Wayland）可能不显示。
 
 ## 项目结构
 
