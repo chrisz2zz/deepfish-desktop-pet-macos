@@ -689,16 +689,30 @@ input { font: inherit; }
   text-align: center;
 }
 .note.warn { color: #a42d35; }
+/* Drawn as SVG: text glyphs from different fonts sit off-centre in a circle
+   (the full-width ＋ leaned left), while a path is centred exactly. */
 .icon-button {
+  display: grid;
+  place-items: center;
   width: 22px;
   height: 22px;
+  padding: 0;
   border: 0;
   border-radius: 50%;
   background: rgba(255, 255, 255, 0.78);
   color: #4a5a7d;
-  font-size: 15px;
   line-height: 1;
   cursor: pointer;
+}
+.icon-button svg,
+.chat-form button svg {
+  width: 12px;
+  height: 12px;
+  fill: none;
+  stroke: currentColor;
+  stroke-width: 1.6;
+  stroke-linecap: round;
+  stroke-linejoin: round;
 }
 .icon-button:hover { background: rgba(255, 255, 255, 0.96); }
 .chat-log {
@@ -763,15 +777,18 @@ input { font: inherit; }
 }
 .chat-form textarea:focus { box-shadow: 0 0 0 3px rgba(40, 118, 232, 0.24); }
 .chat-form button {
+  display: grid;
+  place-items: center;
   width: 30px;
   height: 30px;
+  padding: 0;
   border: 0;
   border-radius: 50%;
   background: rgba(40, 118, 232, 0.92);
   color: white;
-  font-size: 16px;
   cursor: pointer;
 }
+.chat-form button svg { width: 14px; height: 14px; stroke-width: 1.7; }
 .chat-form button:disabled { opacity: 0.45; cursor: wait; }
 
 @keyframes caret-blink { 50% { opacity: 0; } }
