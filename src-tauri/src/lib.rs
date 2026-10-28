@@ -560,8 +560,17 @@ pub fn run() {
             open_settings,
             smoke::smoke_report
         ])
-        .run(tauri::generate_context!())
-        .expect("error while running tauri application");
+        .build(tauri::generate_context!())
+        .expect("error while building tauri application")
+        .run(|app, event| {
+            // Debounced session writes are flushed on the way out so quitting
+            // never loses the last messages.
+            if matches!(event, tauri::RunEvent::Exit) {
+                if let Some(state) = app.try_state::<AppState>() {
+                    state.agent.flush();
+                }
+            }
+        });
 }
 
 #[cfg(test)]

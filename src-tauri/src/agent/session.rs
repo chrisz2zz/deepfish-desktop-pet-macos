@@ -186,6 +186,9 @@ struct SessionsFile {
 pub struct SessionStore {
     path: PathBuf,
     data: SessionsFile,
+    /// Set when memory holds changes the file does not have yet. Message
+    /// appends only mark the store, and a background flush writes it out.
+    dirty: bool,
 }
 
 impl SessionStore {
@@ -195,7 +198,26 @@ impl SessionStore {
             .ok()
             .and_then(|text| serde_json::from_str::<SessionsFile>(&text).ok())
             .unwrap_or_default();
-        Self { path, data }
+        Self {
+            path,
+            data,
+            dirty: false,
+        }
+    }
+
+    /// Marks the store as needing a write without touching the disk.
+    pub fn touch(&mut self) {
+        self.dirty = true;
+    }
+
+    /// Writes pending changes. Returns whether anything was written.
+    pub fn flush(&mut self) -> Result<bool, String> {
+        if !self.dirty {
+            return Ok(false);
+        }
+        self.persist()?;
+        self.dirty = false;
+        Ok(true)
     }
 
     pub fn persist(&self) -> Result<(), String> {
@@ -261,6 +283,7 @@ impl SessionStore {
                 .map_or(0, |(index, _)| index);
             self.data.sessions.remove(oldest);
         }
+        self.dirty = false;
         self.persist()?;
         Ok(session)
     }
@@ -273,6 +296,7 @@ impl SessionStore {
         let session = self.get_mut(id)?;
         session.title = truncate(title, 30);
         session.updated_at = now_ms();
+        self.dirty = false;
         self.persist()
     }
 
@@ -281,10 +305,13 @@ impl SessionStore {
         if self.data.active.as_deref() == Some(id) {
             self.data.active = self.list().first().map(|summary| summary.id.clone());
         }
+        self.dirty = false;
         self.persist()?;
         Ok(self.list())
     }
 
+    /// Immediate write, used for structural changes (new/renamed/deleted
+    /// session, compaction). Message appends go through `touch` + `flush`.
     pub fn save(&self) -> Result<(), String> {
         self.persist()
     }
@@ -298,6 +325,28 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("deepfish-agent-{name}-{}", now_ms()));
         fs::create_dir_all(&dir).unwrap();
         dir
+    }
+
+    #[test]
+    fn debounces_message_writes_until_flush() {
+        let dir = temp_dir("debounce");
+        let mut store = SessionStore::load(&dir);
+        let session = store.create(None).unwrap();
+        let path = dir.join("sessions.json");
+        let before = fs::read_to_string(&path).unwrap();
+        assert!(!store.flush().unwrap(), "a clean store writes nothing");
+
+        store
+            .get_mut(&session.id)
+            .unwrap()
+            .push("user", "还没落盘".to_string(), vec![], None, None, None);
+        store.touch();
+        assert_eq!(fs::read_to_string(&path).unwrap(), before);
+
+        assert!(store.flush().unwrap());
+        assert!(fs::read_to_string(&path).unwrap().contains("还没落盘"));
+        assert!(!store.flush().unwrap());
+        fs::remove_dir_all(dir).ok();
     }
 
     #[test]

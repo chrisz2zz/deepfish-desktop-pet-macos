@@ -5,7 +5,7 @@ pub mod tools;
 
 use std::collections::HashMap;
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 use std::time::Duration;
 
 use serde_json::{json, Value};
@@ -65,6 +65,24 @@ impl<'a> NewMessage<'a> {
     }
 }
 
+/// How often debounced session changes reach the disk. Short enough that a
+/// crash loses at most the last moment of a conversation.
+const FLUSH_INTERVAL: Duration = Duration::from_millis(700);
+
+/// Writes the session file in the background so a long tool-heavy run does not
+/// rewrite the whole document on every message.
+fn spawn_flusher(store: Arc<Mutex<SessionStore>>) {
+    std::thread::spawn(move || loop {
+        std::thread::sleep(FLUSH_INTERVAL);
+        let mut guard = store
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Err(error) = guard.flush() {
+            eprintln!("无法写入会话：{error}");
+        }
+    });
+}
+
 /// An approval card the renderer has not answered yet.
 type PendingApproval = (String, tokio::sync::oneshot::Sender<bool>);
 
@@ -78,7 +96,7 @@ struct CompactionPlan {
 /// and drives the tool loop. Runs are keyed by session so switching or closing
 /// the chat panel never interrupts work that is already in flight.
 pub struct AgentRuntime {
-    store: Mutex<SessionStore>,
+    store: Arc<Mutex<SessionStore>>,
     runs: Mutex<HashMap<String, u64>>,
     /// Pending approvals keyed by tool call id. The runtime awaits the receiver
     /// while the renderer shows an approval card.
@@ -87,8 +105,10 @@ pub struct AgentRuntime {
 
 impl AgentRuntime {
     pub fn new(directory: &Path) -> Self {
+        let store = Arc::new(Mutex::new(SessionStore::load(directory)));
+        spawn_flusher(Arc::clone(&store));
         Self {
-            store: Mutex::new(SessionStore::load(directory)),
+            store,
             runs: Mutex::new(HashMap::new()),
             approvals: Mutex::new(HashMap::new()),
         }
@@ -135,6 +155,14 @@ impl AgentRuntime {
             if let Some((_, sender)) = approvals.remove(&call_id) {
                 let _ = sender.send(false);
             }
+        }
+    }
+
+    /// Writes any debounced session changes. Called on exit and after a run.
+    pub fn flush(&self) {
+        let mut store = self.store();
+        if let Err(error) = store.flush() {
+            eprintln!("无法写入会话：{error}");
         }
     }
 
@@ -187,7 +215,9 @@ impl AgentRuntime {
             message.display,
         );
         store.set_active(id);
-        store.save()?;
+        // Messages are the hot path, so they only mark the store dirty; the
+        // flusher thread writes them out shortly after.
+        store.touch();
         Ok(saved)
     }
 
@@ -647,6 +677,7 @@ async fn run(
     if !cancelled {
         let _ = compact(app, runtime, &settings, api_key.as_deref(), &session_id).await;
     }
+    runtime.flush();
     outcome
 }
 
@@ -688,4 +719,40 @@ async fn compact(
         );
     }
     Ok(applied)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn temp_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!(
+            "deepfish-runtime-{name}-{}",
+            session::now_ms()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn flushes_message_appends_in_the_background() {
+        let dir = temp_dir("flush");
+        let runtime = AgentRuntime::new(&dir);
+        let session = runtime.create(None).unwrap();
+        let path = dir.join("sessions.json");
+        let before = std::fs::read_to_string(&path).unwrap();
+
+        runtime
+            .push_message(&session.id, NewMessage::text("user", "后台写入的内容"))
+            .unwrap();
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), before);
+
+        // The flusher ticks every 700 ms, so this is comfortably inside the
+        // window while still proving the write is debounced, not synchronous.
+        std::thread::sleep(FLUSH_INTERVAL * 2);
+        assert!(std::fs::read_to_string(&path).unwrap().contains("后台写入的内容"));
+
+        runtime.flush();
+        std::fs::remove_dir_all(dir).ok();
+    }
 }
