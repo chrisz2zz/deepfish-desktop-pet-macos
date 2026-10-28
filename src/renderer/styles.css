@@ -119,6 +119,14 @@ input { font: inherit; }
 .speech.notice.notice-error { --notice-accent: #e2667d; }
 .speech.notice.notice-error strong { color: #ffb9c4; }
 
+.pet-stage,
+.pet-stage * {
+  -webkit-user-drag: none;
+  user-select: none;
+  -webkit-user-select: none;
+  -webkit-touch-callout: none;
+}
+
 .pet-stage {
   grid-area: pet;
   align-self: end;

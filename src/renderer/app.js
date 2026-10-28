@@ -1024,6 +1024,11 @@ stage.addEventListener("pointerleave", () => { lastZone = ""; });
 
 stage.addEventListener("pointerdown", (event) => {
   if (event.button !== 0 || event.target === chatFab) return;
+  // Without this the webview starts its own text/image drag when the window
+  // stops moving under the cursor (screen edge, screen switch), which leaves a
+  // blue selection box around the character and kills the drag gesture.
+  event.preventDefault();
+  stage.focus({ preventScroll: true });
   stopWalk();
   stopFramePlayback();
   window.deepFish.pinClickThrough(true);
@@ -1104,6 +1109,12 @@ stage.addEventListener("keydown", (event) => {
     event.preventDefault();
     openChat();
   }
+});
+
+// Same reason as above, for drags that start on any other part of the pet.
+document.addEventListener("dragstart", (event) => event.preventDefault());
+document.addEventListener("selectstart", (event) => {
+  if (!event.target.closest(".chat-log, .chat-input, .session-list")) event.preventDefault();
 });
 
 document.addEventListener("contextmenu", (event) => {
