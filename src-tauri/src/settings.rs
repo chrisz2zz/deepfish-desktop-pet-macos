@@ -12,6 +12,7 @@ const MAX_TOOL_CALL_LIMIT: u32 = 100;
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(rename_all = "camelCase", default)]
+#[allow(clippy::struct_excessive_bools)] // feature toggles are genuinely independent
 pub struct Settings {
     pub provider: String,
     pub endpoint: String,
@@ -208,8 +209,8 @@ mod tests {
         assert_eq!(settings.endpoint, "https://text.pollinations.ai/openai");
         assert_eq!(settings.model, "openai-fast");
         assert!(settings.always_on_top && settings.free_walk && settings.interactive_zones);
-        assert_eq!(settings.scale, 1.0);
-        assert_eq!(settings.behavior_intensity, 1.0);
+        assert!((settings.scale - 1.0).abs() < f64::EPSILON);
+        assert!((settings.behavior_intensity - 1.0).abs() < f64::EPSILON);
     }
 
     #[test]
@@ -290,8 +291,8 @@ mod tests {
 
     #[test]
     fn clamps_out_of_range_values() {
-        assert_eq!(clamp(0.2, 0.6, 1.15), 0.6);
-        assert_eq!(clamp(3.0, 0.6, 1.15), 1.15);
-        assert_eq!(clamp(f64::NAN, 0.6, 1.15), 1.0);
+        assert!((clamp(0.2, 0.6, 1.15) - 0.6).abs() < f64::EPSILON);
+        assert!((clamp(3.0, 0.6, 1.15) - 1.15).abs() < f64::EPSILON);
+        assert!((clamp(f64::NAN, 0.6, 1.15) - 1.0).abs() < f64::EPSILON);
     }
 }

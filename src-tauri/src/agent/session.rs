@@ -258,8 +258,7 @@ impl SessionStore {
                 .iter()
                 .enumerate()
                 .min_by_key(|(_, item)| item.updated_at)
-                .map(|(index, _)| index)
-                .unwrap_or(0);
+                .map_or(0, |(index, _)| index);
             self.data.sessions.remove(oldest);
         }
         self.persist()?;

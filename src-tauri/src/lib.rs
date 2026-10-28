@@ -40,7 +40,7 @@ pub(crate) fn chat_config(state: &AppState) -> (settings::Settings, Option<Strin
     let store = state
         .store
         .lock()
-        .unwrap_or_else(|error| error.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     (store.data.clone(), store.api_key())
 }
 
@@ -76,7 +76,7 @@ fn save_patch(app: &AppHandle, patch: SettingsPatch) -> Option<PublicSettings> {
     let mut store = state
         .store
         .lock()
-        .unwrap_or_else(|error| error.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     store.save(patch).ok()
 }
 
@@ -112,6 +112,7 @@ fn contains_point((ax, ay, aw, ah): WorkArea, x: i32, y: i32) -> bool {
 /// A window spanning two screens is legal even though no single screen holds it,
 /// so the whole rect is checked against the union of every work area.
 fn is_fully_visible(areas: &[WorkArea], x: i32, y: i32, width: i32, height: i32) -> bool {
+    const STEPS: i32 = 6;
     let holds_rect = |area: &WorkArea| {
         let (ax, ay, aw, ah) = *area;
         x >= ax && y >= ay && x + width <= ax + aw && y + height <= ay + ah
@@ -121,7 +122,6 @@ fn is_fully_visible(areas: &[WorkArea], x: i32, y: i32, width: i32, height: i32)
     }
     // Sample the rect including its edges and corners: sampling cell centres
     // instead would let the window hang half a cell off the last screen.
-    const STEPS: i32 = 6;
     let span = STEPS - 1;
     for row in 0..STEPS {
         for col in 0..STEPS {
@@ -243,7 +243,7 @@ fn clamp_to_work_area(window: &WebviewWindow, x: i32, y: i32) -> (i32, i32) {
 /// Webview pointer deltas are logical pixels, while window positions are physical,
 /// so Retina displays need the delta scaled before moving the window.
 fn scale_delta(delta: i32, scale_factor: f64) -> i32 {
-    (delta as f64 * scale_factor).round() as i32
+    (f64::from(delta) * scale_factor).round() as i32
 }
 
 fn move_by(window: &WebviewWindow, dx: i32, dy: i32) -> WalkResult {
@@ -273,8 +273,8 @@ fn remember_window_frame(window: &WebviewWindow, x: i32, y: i32) {
     let scale = window.scale_factor().unwrap_or(1.0);
     if let Some(state) = window.app_handle().try_state::<Arc<ClickThrough>>() {
         state.set_frame(
-            x as f64 / scale,
-            y as f64 / scale,
+            f64::from(x) / scale,
+            f64::from(y) / scale,
             PET_WINDOW_WIDTH,
             PET_WINDOW_HEIGHT,
         );
@@ -442,7 +442,7 @@ fn get_settings(state: State<'_, AppState>) -> PublicSettings {
     let store = state
         .store
         .lock()
-        .unwrap_or_else(|error| error.into_inner());
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
     store.public_value()
 }
 
@@ -456,7 +456,7 @@ fn save_settings(
         let mut store = state
             .store
             .lock()
-            .unwrap_or_else(|error| error.into_inner());
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         store.save(settings)?
     };
     apply_saved_settings(&app, &saved);
@@ -518,7 +518,7 @@ pub fn run() {
             app.manage(click_through.clone());
             if let Some(monitor) = app.primary_monitor()? {
                 click_through.set_screen_height(
-                    monitor.size().height as f64 / monitor.scale_factor(),
+                    f64::from(monitor.size().height) / monitor.scale_factor(),
                 );
             }
 

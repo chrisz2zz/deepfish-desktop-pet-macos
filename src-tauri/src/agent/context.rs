@@ -1,3 +1,5 @@
+use std::fmt::Write as _;
+
 use serde_json::{json, Value};
 
 use crate::chat::SYSTEM_PROMPT;
@@ -52,7 +54,7 @@ pub fn message_tokens(message: &AgentMessage) -> usize {
 }
 
 pub fn history_tokens(session: &Session) -> usize {
-    let summary = session.summary.as_deref().map(estimate_tokens).unwrap_or(0);
+    let summary = session.summary.as_deref().map_or(0, estimate_tokens);
     let body: usize = session
         .messages
         .iter()
@@ -157,7 +159,7 @@ pub fn compaction_prompt(summary: Option<&str>, folded: &[AgentMessage]) -> Stri
             "tool" => "工具结果",
             other => other,
         };
-        prompt.push_str(&format!("{role}：{}\n", truncate(&message.content, 300)));
+        let _ = writeln!(prompt, "{role}：{}", truncate(&message.content, 300));
     }
     prompt.push('\n');
     prompt.push_str(COMPACTION_INSTRUCTION);
@@ -173,7 +175,7 @@ pub fn fallback_summary(folded: &[AgentMessage]) -> String {
             continue;
         }
         let prefix = if message.role == "user" { "用户说" } else { "我回应" };
-        digest.push_str(&format!("{prefix}：{}；", truncate(&message.content, 50)));
+        let _ = write!(digest, "{prefix}：{}；", truncate(&message.content, 50));
         if estimate_tokens(&digest) > 150 {
             break;
         }

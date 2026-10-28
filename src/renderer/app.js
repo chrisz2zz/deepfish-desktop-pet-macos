@@ -650,9 +650,11 @@ function approvalNode(event) {
   node.append(text, actions);
 
   let settled = false;
+  let expiry = 0;
   const finish = (allowed) => {
     if (settled) return;
     settled = true;
+    clearTimeout(expiry);
     pendingApprovals.delete(event.callId);
     allow.disabled = true;
     deny.disabled = true;
@@ -676,7 +678,7 @@ function approvalNode(event) {
     timer.className = "approval-hint";
     timer.textContent = `${Math.round(event.timeout)}s 后自动拒绝`;
     node.append(timer);
-    setTimeout(() => {
+    expiry = setTimeout(() => {
       if (settled) return;
       finish(false);
       agentApi.approve(event.callId, false).catch(() => {});
@@ -811,6 +813,9 @@ function armRemoval(id) {
 
 async function removeSession(id) {
   try {
+    for (const [callId, pending] of pendingApprovals) {
+      if (pending.sessionId === id) pendingApprovals.delete(callId);
+    }
     sessionSummaries = await agentApi.deleteSession(id);
     if (activeSession && activeSession.id === id) {
       activeSession = null;
@@ -896,6 +901,11 @@ function handleAgentEvent(event) {
     return;
   }
   if (event.type === "run-end") {
+    // A run that ended can no longer act on an approval card, so forget any of
+    // its leftovers (a dropped connection would otherwise leak them forever).
+    for (const [callId, pending] of pendingApprovals) {
+      if (pending.sessionId === event.sessionId) pendingApprovals.delete(callId);
+    }
     // The renderer is the only place that knows whether the user is watching,
     // so background runs announce themselves here instead of in Rust.
     if (event.outcome !== "cancelled") {

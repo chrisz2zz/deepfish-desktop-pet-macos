@@ -96,8 +96,7 @@ fn error_detail(payload: &Value, status: reqwest::StatusCode) -> String {
         .pointer("/error/message")
         .and_then(Value::as_str)
         .or_else(|| payload.get("message").and_then(Value::as_str))
-        .map(str::to_string)
-        .unwrap_or_else(|| format!("HTTP {}", status.as_u16()))
+        .map_or_else(|| format!("HTTP {}", status.as_u16()), str::to_string)
 }
 
 pub fn message_content(payload: &Value) -> String {
@@ -111,7 +110,7 @@ pub fn message_content(payload: &Value) -> String {
 
 fn assemble(index: usize, id: Option<&str>, name: Option<&str>) -> AssembledToolCall {
     AssembledToolCall {
-        id: id.map(str::to_string).unwrap_or_else(|| format!("call_{index}")),
+        id: id.map_or_else(|| format!("call_{index}"), str::to_string),
         name: name.unwrap_or_default().to_string(),
         arguments: String::new(),
     }
@@ -202,9 +201,17 @@ pub struct SseBuffer {
     buffer: Vec<u8>,
 }
 
+/// A single SSE line that never ends would otherwise grow this buffer for as
+/// long as the server keeps streaming, so it is capped.
+const MAX_PENDING_LINE: usize = 512 * 1024;
+
 impl SseBuffer {
     pub fn push(&mut self, chunk: &[u8]) -> Vec<String> {
         self.buffer.extend_from_slice(chunk);
+        if self.buffer.len() > MAX_PENDING_LINE {
+            self.buffer.clear();
+            return Vec::new();
+        }
         let mut payloads = Vec::new();
         while let Some(index) = self.buffer.iter().position(|byte| *byte == b'\n') {
             let line: Vec<u8> = self.buffer.drain(..=index).collect();
@@ -371,6 +378,26 @@ mod tests {
         let mut custom = settings();
         custom.endpoint = "http://example.com".to_string();
         assert!(build_request(&custom, Some("key"), json!({})).is_err());
+    }
+
+    #[test]
+    fn strips_leaked_tool_markup() {
+        assert_eq!(strip_tool_markup("现在是 10:00。"), "现在是 10:00。");
+        assert_eq!(
+            strip_tool_markup("查完了。\n<｜｜DSML｜｜tool_calls>\n<｜｜DSML｜｜invoke name=\"get_time\">"),
+            "查完了。"
+        );
+        assert_eq!(strip_tool_markup("<|DSML|>junk"), "");
+        assert_eq!(strip_tool_markup(""), "");
+    }
+
+    #[test]
+    fn bounds_a_line_that_never_ends() {
+        let mut buffer = SseBuffer::default();
+        assert!(buffer.push(&vec![b'x'; MAX_PENDING_LINE + 1]).is_empty());
+        assert_eq!(buffer.buffer.len(), 0);
+        // The parser keeps working afterwards.
+        assert_eq!(buffer.push(b"data: {}\n"), vec!["{}".to_string()]);
     }
 
     #[test]

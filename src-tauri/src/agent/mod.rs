@@ -97,7 +97,7 @@ impl AgentRuntime {
     fn approvals(&self) -> MutexGuard<'_, HashMap<String, PendingApproval>> {
         self.approvals
             .lock()
-            .unwrap_or_else(|error| error.into_inner())
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn request_approval(
@@ -139,11 +139,15 @@ impl AgentRuntime {
     }
 
     fn store(&self) -> MutexGuard<'_, SessionStore> {
-        self.store.lock().unwrap_or_else(|error| error.into_inner())
+        self.store
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     fn runs(&self) -> MutexGuard<'_, HashMap<String, u64>> {
-        self.runs.lock().unwrap_or_else(|error| error.into_inner())
+        self.runs
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     pub fn sessions(&self) -> Vec<SessionSummary> {
@@ -353,31 +357,34 @@ pub async fn agent_send(
     run(&app, &state.agent, settings, api_key, session_id, request_id, text).await
 }
 
-async fn run(
+/// Drives one user question to completion. The caller is responsible for
+/// cleanup and for the terminal events, so an early `?` here can never leave a
+/// session marked as running.
+#[allow(clippy::too_many_arguments)]
+async fn run_loop(
     app: &AppHandle,
     runtime: &AgentRuntime,
-    settings: Settings,
-    api_key: Option<String>,
-    session_id: String,
+    settings: &Settings,
+    api_key: Option<&str>,
+    session_id: &str,
     request_id: u64,
     text: String,
 ) -> Result<(), String> {
-    let user_message = runtime.push_message(&session_id, NewMessage::text("user", text))?;
+    let user_message = runtime.push_message(session_id, NewMessage::text("user", text))?;
     emit(
         app,
-        &session_id,
+        session_id,
         request_id,
         json!({ "type": "message", "message": user_message }),
     );
-    runtime.begin(&session_id, request_id);
+    runtime.begin(session_id, request_id);
     emit(
         app,
-        &session_id,
+        session_id,
         request_id,
         json!({ "type": "status", "state": "running", "step": 0 }),
     );
 
-    let mut failure: Option<String> = None;
     let mut step = 0usize;
     let mut tool_calls_used = 0usize;
     let loop_limit = settings.agent_loop_limit as usize;
@@ -385,7 +392,7 @@ async fn run(
     let mut budget_notes: Vec<String> = Vec::new();
 
     loop {
-        if runtime.is_cancelled(&session_id, request_id) {
+        if runtime.is_cancelled(session_id, request_id) {
             break;
         }
         if step > loop_limit {
@@ -394,18 +401,18 @@ async fn run(
         // The last pass runs without tools so the model has to wrap up in words,
         // and so does every pass once the tool budget is spent.
         let use_tools = step < loop_limit && tool_calls_used < call_limit;
-        let messages = runtime.context(&session_id, use_tools)?;
+        let messages = runtime.context(session_id, use_tools)?;
         let tools = use_tools.then(tools::specs);
-        let body = chat::payload(&settings, messages, tools, true, MAX_REPLY_TOKENS);
+        let body = chat::payload(settings, messages, tools, true, MAX_REPLY_TOKENS);
         let outcome = chat::stream_completion(
-            &settings,
-            api_key.as_deref(),
+            settings,
+            api_key,
             body,
-            || runtime.is_cancelled(&session_id, request_id),
+            || runtime.is_cancelled(session_id, request_id),
             |delta| {
                 emit(
                     app,
-                    &session_id,
+                    session_id,
                     request_id,
                     json!({ "type": "delta", "text": delta }),
                 );
@@ -415,12 +422,10 @@ async fn run(
 
         let outcome = match outcome {
             Ok(outcome) => outcome,
-            Err(error) => {
-                if !runtime.is_cancelled(&session_id, request_id) {
-                    failure = Some(error);
-                }
-                break;
-            }
+            // A cancelled run stops quietly; a real failure is reported by the
+            // caller after it has cleaned up.
+            Err(_) if runtime.is_cancelled(session_id, request_id) => return Ok(()),
+            Err(error) => return Err(error),
         };
 
         let calls: Vec<ToolCall> = outcome
@@ -436,10 +441,10 @@ async fn run(
             content
         };
         let message =
-            runtime.push_message(&session_id, NewMessage::assistant(content, calls.clone()))?;
+            runtime.push_message(session_id, NewMessage::assistant(content, calls.clone()))?;
         emit(
             app,
-            &session_id,
+            session_id,
             request_id,
             json!({ "type": "message", "message": message }),
         );
@@ -450,7 +455,7 @@ async fn run(
 
         let root = risk::tool_root();
         for call in &calls {
-            if runtime.is_cancelled(&session_id, request_id) {
+            if runtime.is_cancelled(session_id, request_id) {
                 break;
             }
             // Every emitted call needs a tool message, so over-budget calls are
@@ -463,12 +468,12 @@ async fn run(
                 }
                 let refused = tools::ToolOutcome::budget_exhausted(&call.name, call_limit);
                 let tool_message = runtime.push_message(
-                    &session_id,
+                    session_id,
                     NewMessage::tool(call, refused.content, refused.display),
                 )?;
                 emit(
                     app,
-                    &session_id,
+                    session_id,
                     request_id,
                     json!({ "type": "message", "message": tool_message }),
                 );
@@ -481,7 +486,7 @@ async fn run(
             if plan.risk != risk::Risk::Safe {
                 emit(
                     app,
-                    &session_id,
+                    session_id,
                     request_id,
                     json!({
                         "type": "approval",
@@ -495,7 +500,7 @@ async fn run(
                 );
             }
             if plan.risk == risk::Risk::NeedsApproval {
-                let receiver = runtime.request_approval(&session_id, &call.id);
+                let receiver = runtime.request_approval(session_id, &call.id);
                 // A dropped sender (session deleted, run cancelled) or a timeout
                 // both mean "no consent".
                 denied = !matches!(
@@ -512,7 +517,7 @@ async fn run(
             } else {
                 emit(
                     app,
-                    &session_id,
+                    session_id,
                     request_id,
                     json!({ "type": "tool", "status": "running", "name": call.name, "display": tools::label(&call.name) }),
                 );
@@ -533,7 +538,7 @@ async fn run(
             };
             emit(
                 app,
-                &session_id,
+                session_id,
                 request_id,
                 json!({
                     "type": "approval-result",
@@ -542,21 +547,21 @@ async fn run(
                 }),
             );
             if let tools::ToolEffect::RenameSession(title) = result.effect {
-                let _ = runtime.rename(&session_id, &title);
+                let _ = runtime.rename(session_id, &title);
                 emit(
                     app,
-                    &session_id,
+                    session_id,
                     request_id,
                     json!({ "type": "renamed", "title": title }),
                 );
             }
             let tool_message = runtime.push_message(
-                &session_id,
+                session_id,
                 NewMessage::tool(call, result.content, result.display),
             )?;
             emit(
                 app,
-                &session_id,
+                session_id,
                 request_id,
                 json!({ "type": "message", "message": tool_message }),
             );
@@ -570,11 +575,44 @@ async fn run(
         }
         emit(
             app,
-            &session_id,
+            session_id,
             request_id,
             json!({ "type": "status", "state": "running", "step": step }),
         );
     }
+
+    for note in &budget_notes {
+        emit(
+            app,
+            session_id,
+            request_id,
+            json!({ "type": "note", "level": "warn", "text": note }),
+        );
+    }
+    Ok(())
+}
+
+/// Public entry point: runs the loop, then always clears the run and reports how
+/// it ended (the renderer turns that into a background-task notice).
+async fn run(
+    app: &AppHandle,
+    runtime: &AgentRuntime,
+    settings: Settings,
+    api_key: Option<String>,
+    session_id: String,
+    request_id: u64,
+    text: String,
+) -> Result<(), String> {
+    let outcome = run_loop(
+        app,
+        runtime,
+        &settings,
+        api_key.as_deref(),
+        &session_id,
+        request_id,
+        text,
+    )
+    .await;
 
     let cancelled = runtime.is_cancelled(&session_id, request_id);
     runtime.finish(&session_id, request_id);
@@ -592,21 +630,12 @@ async fn run(
         request_id,
         json!({
             "type": "run-end",
-            "outcome": if cancelled { "cancelled" } else if failure.is_some() { "error" } else { "ok" },
-            "message": failure,
+            "outcome": if cancelled { "cancelled" } else if outcome.is_err() { "error" } else { "ok" },
+            "message": outcome.as_ref().err(),
         }),
     );
 
-    for note in &budget_notes {
-        emit(
-            app,
-            &session_id,
-            request_id,
-            json!({ "type": "note", "level": "warn", "text": note }),
-        );
-    }
-
-    if let Some(error) = failure {
+    if let Err(error) = &outcome {
         emit(
             app,
             &session_id,
@@ -615,10 +644,10 @@ async fn run(
         );
     }
 
-    if !runtime.is_cancelled(&session_id, request_id) {
+    if !cancelled {
         let _ = compact(app, runtime, &settings, api_key.as_deref(), &session_id).await;
     }
-    Ok(())
+    outcome
 }
 
 /// Folds the oldest turns into a summary. Falls back to a deterministic digest

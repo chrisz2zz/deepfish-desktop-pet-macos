@@ -72,22 +72,19 @@ pub fn start_if_requested(app: AppHandle) {
         }
 
         thread::sleep(Duration::from_millis(1800));
-        match app.get_webview_window(SETTINGS_WINDOW_LABEL) {
-            Some(settings) => {
-                if let Err(error) = settings.eval(SETTINGS_CHECK) {
-                    fail(&app, &format!("settings eval failed: {error}"));
-                    return;
-                }
-            }
-            None => {
-                fail(&app, "missing settings window");
+        if let Some(settings) = app.get_webview_window(SETTINGS_WINDOW_LABEL) {
+            if let Err(error) = settings.eval(SETTINGS_CHECK) {
+                fail(&app, &format!("settings eval failed: {error}"));
                 return;
             }
+        } else {
+            fail(&app, "missing settings window");
+            return;
         }
 
         thread::sleep(Duration::from_millis(6000));
         if !COMPLETE.load(Ordering::SeqCst) {
-            eprintln!("SMOKE_FAILED timeout {}", directory);
+            eprintln!("SMOKE_FAILED timeout {directory}");
             app.exit(1);
         }
     });

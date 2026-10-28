@@ -92,7 +92,10 @@ npm test           # Node 内置测试：作息、行为目录、手势与平台
 npm run test:rust  # Rust 测试：聊天请求构造与设置校验
 npm run check      # 检查关键文件存在且脚本语法有效
 npm run smoke      # 启动已打包的 .app 做端到端自检（需先 npm run build）
+cargo clippy --manifest-path src-tauri/Cargo.toml --all-targets -- -D warnings
 ```
+
+Rust 侧在 `Cargo.toml` 的 `[lints.clippy]` 里开了 pedantic（放开了数值转换、文档必填、Tauri 命令参数必须 owned 这几类噪音），因此 `-D warnings` 应该保持零警告。
 
 `npm run smoke` 会把结果写入 `work/smoke-macos/`，校验桌宠帧是否加载、`window.deepFish` 桥接是否可用、气泡聊天与流式接口是否就绪、穿透点击蒙版是否上报、设置窗口是否渲染并能经 Rust 后端保存设置，然后自动退出。
 

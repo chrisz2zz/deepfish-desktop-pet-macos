@@ -1,3 +1,4 @@
+use std::fmt::Write as _;
 use std::io::Write;
 use std::path::Path;
 use std::process::{Command, Stdio};
@@ -315,7 +316,7 @@ fn read_file(root: &Path, path: &Path, offset: usize, limit: usize) -> ToolOutco
     let end = (start + limit.min(MAX_READ_LINES)).min(total);
     let mut body = String::new();
     for (index, line) in lines[start..end].iter().enumerate() {
-        body.push_str(&format!("{}| {}\n", start + index + 1, line));
+        let _ = writeln!(body, "{}| {}", start + index + 1, line);
     }
     let truncated = end < total || sliced.len() < bytes.len();
     ToolOutcome {
@@ -429,20 +430,21 @@ fn run_command(root: &Path, command: &str, cwd: &Path, timeout: Duration) -> Too
 
     let code = status.and_then(|status| status.code());
     let mut report = String::new();
-    report.push_str(&format!(
-        "$ {command}\n（目录 {}，{}）\n",
-        risk::display_path(root, cwd),
-        match (timed_out, code) {
-            (true, _) => format!("超时 {} 秒已终止", timeout.as_secs()),
-            (false, Some(code)) => format!("退出码 {code}"),
-            (false, None) => "被信号终止".to_string(),
-        }
-    ));
+    let status_line = match (timed_out, code) {
+        (true, _) => format!("超时 {} 秒已终止", timeout.as_secs()),
+        (false, Some(code)) => format!("退出码 {code}"),
+        (false, None) => "被信号终止".to_string(),
+    };
+    let _ = write!(
+        report,
+        "$ {command}\n（目录 {}，{status_line}）\n",
+        risk::display_path(root, cwd)
+    );
     if !out.trim().is_empty() {
-        report.push_str(&format!("stdout:\n{}\n", out.trim_end()));
+        let _ = write!(report, "stdout:\n{}\n", out.trim_end());
     }
     if !err.trim().is_empty() {
-        report.push_str(&format!("stderr:\n{}\n", err.trim_end()));
+        let _ = write!(report, "stderr:\n{}\n", err.trim_end());
     }
     if out.trim().is_empty() && err.trim().is_empty() {
         report.push_str("（没有输出）");

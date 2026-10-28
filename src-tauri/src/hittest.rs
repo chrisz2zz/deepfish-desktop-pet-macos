@@ -41,7 +41,7 @@ impl HitMask {
         if self.cols == 0 || self.rows == 0 || !x.is_finite() || !y.is_finite() {
             return false;
         }
-        if x < 0.0 || y < 0.0 || x >= self.cols as f64 * self.cell || y >= self.rows as f64 * self.cell
+        if x < 0.0 || y < 0.0 || x >= f64::from(self.cols) * self.cell || y >= f64::from(self.rows) * self.cell
         {
             return false;
         }
@@ -85,7 +85,7 @@ impl ClickThrough {
     }
 
     fn lock(&self) -> std::sync::MutexGuard<'_, HitTestState> {
-        self.state.lock().unwrap_or_else(|error| error.into_inner())
+        self.state.lock().unwrap_or_else(std::sync::PoisonError::into_inner)
     }
 
     pub fn set_mask(&self, cols: u32, rows: u32, cell: f64, bits: Vec<u8>) {
