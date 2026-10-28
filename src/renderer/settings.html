@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; style-src 'self'; script-src 'self'; img-src 'self'; connect-src 'self' ipc: http://ipc.localhost">
+    <title>大肥鱼设置</title>
+    <link rel="stylesheet" href="./settings.css">
+  </head>
+  <body>
+    <main class="settings-shell">
+      <header>
+        <img src="../../assets/character.png" alt="大肥鱼">
+        <div><h1>大肥鱼设置</h1><p>桌宠行为与聊天模型</p></div>
+      </header>
+
+      <form id="settings-form">
+        <section>
+          <h2>聊天模型</h2>
+          <div class="segmented" role="radiogroup" aria-label="模型服务商">
+            <label><input type="radio" name="provider" value="pollinations"><span>免费模型</span></label>
+            <label><input type="radio" name="provider" value="deepseek"><span>DeepSeek</span></label>
+            <label><input type="radio" name="provider" value="custom"><span>自定义</span></label>
+          </div>
+          <label class="field"><span>API 地址</span><input id="endpoint" name="endpoint" type="url" required></label>
+          <label class="field"><span>模型名称</span><input id="model" name="model" required></label>
+          <label class="field" id="key-field"><span>API Key</span><input id="api-key" name="apiKey" type="password" autocomplete="new-password" placeholder="未填写"><small id="key-status"></small></label>
+          <label class="check"><input id="clear-key" type="checkbox"><span>清除已保存的 API Key</span></label>
+        </section>
+
+        <section>
+          <h2>桌宠行为</h2>
+          <label class="switch-row"><span><strong>始终置顶</strong><small>保持在其他窗口上方</small></span><input id="always-on-top" type="checkbox"></label>
+          <label class="switch-row"><span><strong>音效</strong><small>预留行为音效开关</small></span><input id="sound" type="checkbox"></label>
+          <label class="switch-row"><span><strong>自动散步</strong><small>按作息在当前屏幕内来回走动</small></span><input id="free-walk" type="checkbox"></label>
+          <label class="switch-row"><span><strong>身体区域感应</strong><small>散步时经过头发、脸和腿触发不同反馈</small></span><input id="interactive-zones" type="checkbox"></label>
+          <label class="switch-row"><span><strong>标志性台词</strong><small>允许更放飞的模型梗和吐槽</small></span><input id="spicy-lines" type="checkbox"></label>
+          <label class="field"><span>显示比例 <output id="scale-output">100%</output></span><input id="scale" type="range" min="0.6" max="1.15" step="0.05"></label>
+          <label class="field"><span>行为频率 <output id="behavior-output">100%</output></span><input id="behavior-intensity" type="range" min="0.5" max="1.8" step="0.1"></label>
+        </section>
+
+        <p id="status" class="status" role="status"></p>
+        <div class="actions"><button id="reset-provider" class="secondary" type="button">恢复免费模型</button><button type="submit">保存设置</button></div>
+      </form>
+    </main>
+    <script src="../shared/desktop-bridge.js"></script>
+    <script src="./settings.js"></script>
+  </body>
+</html>

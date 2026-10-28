@@ -1,0 +1,57 @@
+{
+  "$schema": "../node_modules/@tauri-apps/cli/config.schema.json",
+  "productName": "大肥鱼桌宠",
+  "version": "1.0.0",
+  "identifier": "com.deepfish.desktop-pet",
+  "build": {
+    "frontendDist": "../build/web",
+    "beforeDevCommand": "npm run web:prepare",
+    "beforeBuildCommand": "npm run web:prepare"
+  },
+  "app": {
+    "windows": [
+      {
+        "label": "pet",
+        "title": "大肥鱼桌宠",
+        "width": 340,
+        "height": 430,
+        "resizable": false,
+        "maximizable": false,
+        "minimizable": false,
+        "decorations": false,
+        "transparent": true,
+        "shadow": false,
+        "alwaysOnTop": true,
+        "skipTaskbar": true,
+        "acceptFirstMouse": true,
+        "focus": false,
+        "visible": false
+      }
+    ],
+    "security": {
+      "csp": "default-src 'self'; img-src 'self' data:; style-src 'self'; script-src 'self'; connect-src 'self' ipc: http://ipc.localhost"
+    },
+    "withGlobalTauri": true
+  },
+  "bundle": {
+    "active": true,
+    "targets": [
+      "app",
+      "dmg"
+    ],
+    "icon": [
+      "icons/32x32.png",
+      "icons/128x128.png",
+      "icons/128x128@2x.png",
+      "icons/icon.icns",
+      "icons/icon.ico"
+    ],
+    "category": "Entertainment",
+    "shortDescription": "蓝色大肥鱼桌宠",
+    "longDescription": "会跟随本地时间作息的蓝色大肥鱼桌宠，可以拖动、投喂、摸头和聊天。",
+    "copyright": "MIT licensed source code",
+    "macOS": {
+      "minimumSystemVersion": "10.15"
+    }
+  }
+}

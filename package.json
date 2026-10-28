@@ -1,0 +1,20 @@
+{
+  "name": "deepfish-desktop-pet-macos",
+  "version": "1.0.0",
+  "description": "蓝色大肥鱼 macOS 桌宠（Tauri 2）",
+  "private": true,
+  "license": "MIT",
+  "author": "DeepFish Desktop Pet contributors",
+  "scripts": {
+    "dev": "tauri dev",
+    "build": "tauri build",
+    "web:prepare": "node scripts/prepare-web.mjs",
+    "test": "node --test",
+    "test:rust": "npm run web:prepare && cargo test --manifest-path src-tauri/Cargo.toml",
+    "check": "node scripts/check.mjs",
+    "smoke": "node scripts/smoke-macos.mjs"
+  },
+  "devDependencies": {
+    "@tauri-apps/cli": "^2.12.4"
+  }
+}
